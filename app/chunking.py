@@ -5,6 +5,10 @@ from app.models import Chunk
 SEPARATORS = ["\n\n", "\n", ". ", " "]
 MAX_TOKENS = 600
 OVERLAP_TOKENS = 90
+# Voyage truncates inputs to 32K tokens (truncation=True default). When an
+# unsplittable piece exceeds this, only the first VOYAGE_INPUT_TOKEN_CAP tokens
+# are actually embedded; cap the persisted token_count to reflect that.
+VOYAGE_INPUT_TOKEN_CAP = 32_000
 
 
 def chunk_text(text: str) -> list[Chunk]:
@@ -21,7 +25,7 @@ def chunk_text(text: str) -> list[Chunk]:
     # Re-tokenize final joined chunks for exact persisted token_count.
     final_counts = per_text_token_counts(windows)
     return [
-        Chunk(text=w, ordinal=i, token_count=c)
+        Chunk(text=w, ordinal=i, token_count=min(c, VOYAGE_INPUT_TOKEN_CAP))
         for i, (w, c) in enumerate(zip(windows, final_counts))
     ]
 
