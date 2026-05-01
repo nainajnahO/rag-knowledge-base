@@ -42,7 +42,7 @@ This is a working artifact — written for the reviewer and for ourselves.
 - `voyage-4` is Voyage's labelled general-purpose default for retrieval — using the recommended default is a stronger story than picking the biggest tier and defending it.
 - Voyage is Anthropic's recommended embedding partner; clean README narrative ("used Anthropic's stack end-to-end").
 - 1024 dimensions is a clean column type for pgvector with no storage bloat. Matryoshka variants (256/512/2048) are available without a model swap if storage or speed ever becomes a real constraint.
-- Cosine via pgvector's `<=>` operator. voyage-4 embeddings are L2-normalized (per Voyage's docs: *"Voyage embeddings are normalized to length 1, therefore dot-product and cosine similarity are the same"*), so cosine, dot product, and Euclidean rank identically; cosine is the conventional choice and matches Voyage's documentation examples.
+- Cosine via pgvector's `<=>` operator — the conventional choice for retrieval and the one Voyage's documentation examples use. voyage-4 embeddings are L2-normalized, so cosine, dot product, and Euclidean rank identically anyway.
 - 32K-token per-input context length is far above our 600-token chunks — no risk of truncation.
 
 **API usage notes (load-bearing for the embedder module):**
