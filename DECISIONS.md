@@ -49,7 +49,6 @@ This is a working artifact — written for the reviewer and for ourselves.
 - **Always pass `input_type`.** Voyage prepends a different internal prompt depending on whether the text is being embedded as a *document* (for indexing) or as a *query* (for retrieval). Skipping `input_type` works but produces weaker retrieval. The embedder module's signature is `embed_chunks(chunks, input_type="document") -> list[list[float]]`; ingestion calls it with the default, search/chat (PR 5/6) call it with `input_type="query"`. Embeddings produced with vs without `input_type` are still mutually compatible — this is purely a quality lever.
 - **Per-request caps for voyage-4:** ≤1,000 inputs AND ≤320,000 tokens per `/v1/embeddings` call. The embedder module owns sub-batching and enforces both ceilings simultaneously. With 600-token chunks, the token cap binds first at ~533 chunks per call; almost no real document hits either limit in one batch.
 - **`output_dtype="float"`** (the default) — full-precision 32-bit embeddings. Quantized variants (int8 / binary) save storage but lose recall; not worth the complexity at this scale.
-- **`truncation=True`** (the default) — silent truncation at 32K tokens per input. Our chunks are 600 tokens, so this never trips, but the default is the safe one anyway.
 
 **Migration notes — voyage-4 → voyage-context-3 later (cheap):**
 - Same default dimension (1024) → **no schema migration**.
