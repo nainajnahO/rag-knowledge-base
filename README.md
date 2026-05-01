@@ -44,6 +44,8 @@ curl -X POST http://localhost:8000/text \
 
 Requires Docker, `uv`, and Python 3.14 (uv will manage Python automatically if you don't have it).
 
+> **Dedupe behavior (`POST /text`).** If the request's `text` matches an already-ingested document (by SHA-256 content hash, applied after stripping leading/trailing whitespace), the existing `document_id` is returned and **any new `title`, `author`, `published_date`, or `metadata` in the request is ignored** — the stored row keeps its original values. This is intentional idempotent behavior (`DECISIONS.md` §12). If you need to update metadata on an existing document, that's out of scope for this endpoint.
+
 ---
 
 ## Architecture & tradeoffs
