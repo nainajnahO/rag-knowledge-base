@@ -30,7 +30,7 @@ This is a working artifact — written for the reviewer and for ourselves.
 **Decision:** Voyage `voyage-4`, 1024 dimensions, cosine distance.
 
 **Alternatives considered:**
-- `voyage-4-large` (same 1024-dim default with Matryoshka 256/512/2048; "best general-purpose & multilingual" tier — rejected as overshooting; "biggest model" needs corpus-specific benchmarks to defend, which a take-home doesn't have)
+- `voyage-4-large` (same 1024-dim default with Matryoshka 256/512/2048; "best general-purpose & multilingual" tier — rejected as overshooting; "biggest model" needs corpus-specific benchmarks to defend, which a take-home doesn't have. Also has a tighter per-request token cap of 120K vs voyage-4's 320K, so any future migration would also need the embedder to re-tune its sub-batching limits.)
 - `voyage-4-lite` (same dim options; "optimized for latency and cost" tier — rejected as undershooting on a quality-graded RAG eval where cost differences are pennies)
 - `voyage-4-nano` (open-weight, smallest of the 4-series — interesting but no meaningful advantage over `voyage-4` here)
 - `voyage-context-3` (1024-dim, contextual embeddings — each chunk's embedding incorporates surrounding-document context; deferred per migration notes below)
