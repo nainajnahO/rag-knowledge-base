@@ -11,8 +11,8 @@ Design decisions and the alternatives considered are documented in [`DECISIONS.m
 ## How to run
 
 ```bash
-# 1. Start Postgres + pgvector
-docker compose up -d
+# 1. Start Postgres + pgvector (fresh-init applies the schema)
+docker compose down -v && docker compose up -d
 
 # 2. Install Python deps (uv reads pyproject.toml + .python-version)
 uv sync
