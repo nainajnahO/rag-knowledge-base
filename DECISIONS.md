@@ -17,7 +17,7 @@ This is a working artifact — written for the reviewer and for ourselves.
 
 **Why this choice:**
 - PDF text extraction, embedding/LLM SDKs, tokenizers, and RAG tooling are all Python-first ecosystems. Node would mean fighting the ecosystem on a take-home.
-- pgvector handles 100k+ chunks comfortably and gives us *one* database for documents, chunks, embeddings, metadata, *and* BM25 (via tsvector). A dedicated vector DB would force two stores in sync for no benefit at this scale.
+- pgvector handles 100k+ chunks comfortably and gives us *one* database for documents, chunks, embeddings, metadata, *and* lexical ranking (via tsvector). A dedicated vector DB would force two stores in sync for no benefit at this scale.
 - Python 3.14 because "default to the latest stable" is the rule. All deps in our list (`fastapi`, `pydantic`, `psycopg`, `voyageai`, `anthropic`, `pymupdf`) ship 3.14 wheels.
 - Docker Compose because it's reproducible by the reviewer with one command and avoids hosted-service signup friction. Free-tier hosted Postgres (Supabase/Neon) was rejected: pausing free tiers, shared credentials, and using ~5% of a managed BaaS would be exactly the unnecessary abstraction the brief warns against.
 
@@ -92,9 +92,11 @@ This is a working artifact — written for the reviewer and for ourselves.
 
 **Decision:** Hybrid — typed columns for well-known fields + JSONB for the long tail.
 
-**Required (typed) on upload:** `title`, `source_type`.
+**Required (typed) on upload:** `title`.
 **Optional (typed):** `author`, `published_date`.
-**Catch-all:** `metadata jsonb` with a GIN index for arbitrary extras.
+**Catch-all:** `metadata jsonb` with a GIN index for arbitrary extras (including any categorical tagging the user wants to attach).
+
+**A note on `source_type`:** earlier drafts of this design included a typed `source_type` column with a fixed taxonomy (`'memo' | 'report' | 'article' | 'text'`) inspired by the brief's mention of "memos, reports, articles." The brief uses that phrase only as background context describing what users might upload — it does *not* require a fixed categorization, and the metadata schema is explicitly "what you define." Baking the taxonomy into the schema would be inventing constraints the brief doesn't impose. Categorical tagging instead lives in the JSONB `metadata` column (e.g., `{"type": "memo", "department": "finance"}`) and is filterable via `@>` containment, indexed by GIN.
 
 **Alternatives considered:**
 - Pure JSONB (one `metadata` column, anything goes — flexible but type-blind; weak data-modeling story)
@@ -113,7 +115,6 @@ This is a working artifact — written for the reviewer and for ourselves.
 CREATE TABLE documents (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     title           TEXT NOT NULL,
-    source_type     TEXT NOT NULL,            -- 'memo' | 'report' | 'article' | 'text'
     author          TEXT,
     published_date  DATE,
     metadata        JSONB NOT NULL DEFAULT '{}',
@@ -121,7 +122,6 @@ CREATE TABLE documents (
     content_hash    TEXT NOT NULL UNIQUE,     -- SHA-256 for dedupe
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_documents_source_type    ON documents (source_type);
 CREATE INDEX idx_documents_published_date ON documents (published_date);
 CREATE INDEX idx_documents_metadata       ON documents USING GIN (metadata);
 
@@ -132,16 +132,16 @@ CREATE TABLE chunks (
     text         TEXT NOT NULL,
     token_count  INT NOT NULL,
     embedding    vector(1024) NOT NULL,
-    tsv          tsvector GENERATED ALWAYS AS (to_tsvector('english', text)) STORED,
     UNIQUE (document_id, ordinal)
 );
 CREATE INDEX idx_chunks_embedding ON chunks USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX idx_chunks_tsv       ON chunks USING GIN (tsv);
 ```
 
+The `tsv` column and its GIN index land later, in the hybrid-search step (build sequence §16, item 7). They're scaffolding for the optional lexical lane and don't belong in the must-have schema.
+
 **Filter API on `/search`:**
-- Typed query params: `source_type`, `author`, `published_after`, `published_before`
-- JSONB equality: `meta.<key>=<value>` (e.g., `meta.department=research`)
+- Typed query params: `author`, `published_after`, `published_before`
+- JSONB containment: `metadata @> '{"type": "memo"}'` (the API surface accepts simple `meta.<key>=<value>` query params and translates them to JSONB containment server-side)
 - No DSL, no `$and`/`$or`/`$gt` operators — the brief is about RAG, not query languages.
 
 ---
@@ -192,41 +192,65 @@ PyMuPDF is dual-licensed: AGPL by default, with a commercial license available f
 
 **Decision:** Reciprocal Rank Fusion (RRF), constant `k=60`.
 
+**Terminology note:** This section uses "lexical ranking" or "lexical lane" rather than "BM25" for the keyword-search component. Postgres's full-text search ships with `ts_rank` and `ts_rank_cd`, which are term-frequency-based ranking functions — *not* the canonical BM25 formula (which adds IDF and saturation parameters `k1`, `b`). The role is identical (lexical complement to the dense lane) and RRF fusion is rank-based, so the specific score formula matters less than the rank ordering it produces. Real BM25 in Postgres requires the `pg_search` extension (ParadeDB), deemed unnecessary at take-home scale. The brief uses "BM25" as a category label; we read it that way.
+
 **Alternatives considered:**
-- Linear weighted combination `α · vector + (1−α) · bm25` (requires score normalization and tuned α)
+- Linear weighted combination `α · vector + (1−α) · lex` (requires score normalization and tuned α; `lex` here standing in for whatever lexical score we use)
 - Convex combination with min-max or z-score normalization (same problem, more steps)
 - CombSUM / CombMNZ (older, superseded by RRF)
 - Skipping hybrid entirely (vector-only)
 
 **Why this choice:**
 - Parameter-free — no tuning data needed, no α to defend.
-- No score normalization needed (BM25 is unbounded, cosine is `[-1, 1]`, mixing them naively is broken).
+- No score normalization needed (lexical scores from `ts_rank` are query-dependent in magnitude, cosine is `[-1, 1]`; mixing them naively is broken).
 - Industry standard in 2026 (Elastic, Vespa, Weaviate, Qdrant all default to RRF).
 - One SQL query with two CTEs and a JOIN — ~20 lines, no Python-side merging.
 
-**Implementation sketch:**
+**Implementation sketch** *(the `tsv` column referenced below lands in this PR; the must-have schema in PR 2 omits it)*:
 
 ```sql
 WITH vec AS (
   SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank
   FROM chunks ORDER BY embedding <=> $1 LIMIT 50
 ),
-bm25 AS (
+lex AS (
   SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank(tsv, q) DESC) AS rank
-  FROM chunks, plainto_tsquery('english', $2) q
+  FROM chunks, plainto_tsquery('simple', $2) q
   WHERE tsv @@ q LIMIT 50
 )
 SELECT c.id, c.text, c.document_id,
-       COALESCE(1.0/(60+vec.rank), 0) + COALESCE(1.0/(60+bm25.rank), 0) AS rrf_score
+       COALESCE(1.0/(60+vec.rank), 0) + COALESCE(1.0/(60+lex.rank), 0) AS rrf_score
 FROM chunks c
-LEFT JOIN vec  ON c.id = vec.id
-LEFT JOIN bm25 ON c.id = bm25.id
-WHERE vec.id IS NOT NULL OR bm25.id IS NOT NULL
+LEFT JOIN vec ON c.id = vec.id
+LEFT JOIN lex ON c.id = lex.id
+WHERE vec.id IS NOT NULL OR lex.id IS NOT NULL
 ORDER BY rrf_score DESC
 LIMIT 10;
 ```
 
-**Trade-off — language config:** `to_tsvector('english', ...)` does English stemming + stopword removal. For multilingual or Swedish corpora, `'english'` is wrong. README will note: switch to per-language configs or `'simple'` (no stemming) as a language-agnostic fallback.
+### 7.1 Lexical lane language config — `'simple'`
+
+The `tsvector` column needs a Postgres text-search config that governs tokenization, stemming, and stop-word filtering. The brief doesn't specify a corpus language, so we picked the language-neutral option.
+
+**Alternatives considered:**
+- **`'english'`** — Porter stemmer + English stop words. Best lexical recall on English prose. Actively bad on non-English text: mis-stems Norwegian, French, etc., turning the lexical lane into noise on those docs.
+- **A specific non-English config** (e.g., `'norwegian'`) — same shape, different bet on which single language wins. Wrong if the corpus turns out to be in a different language.
+- **Per-document language tracking** — store `language` per document, copy onto each chunk, generate `tsv` with the per-row config (`to_tsvector(language, text)`). Properly multilingual lexical ranking, but requires language detection at upload and query time, plus a denormalized `language` column on chunks (Postgres GENERATED columns can only reference same-row data). See migration notes below.
+
+**Why `'simple'`:**
+- The lexical lane's main value-add in our hybrid is exact-term matching (proper nouns, codes, acronyms, technical jargon). `'simple'` delivers that for any language.
+- The morphology and stop-word lift of a language-specific config (`"policies"` matching `"policy"`) is partially absorbed by voyage-3 in the dense lane — semantically equivalent inflections produce nearby vectors.
+- The brief is silent on language. `'english'` would be a bet that *penalizes* non-English content rather than just leaving it un-optimized.
+- Cross-language retrieval is unaffected by this choice — voyage-3 (multilingual) carries that case through the dense lane regardless of what we put in the lexical lane.
+
+**Migration notes — `'simple'` → per-document language tracking (~half-day):**
+- Add `language regconfig NOT NULL` on `documents` (default `'simple'`) — detected at upload via a small library (`langdetect`, `fasttext-langid`) or supplied by the client.
+- Add `language regconfig NOT NULL` on `chunks` — denormalized from the parent doc on insert (Postgres GENERATED columns can't reference other tables).
+- Drop the existing `tsv` column and `idx_chunks_tsv` GIN index.
+- Re-add `tsv` as `GENERATED ALWAYS AS (to_tsvector(language, text)) STORED`.
+- Recreate the GIN index.
+- At query time: detect (or accept via query param) the query's language, parse with `plainto_tsquery(detected_lang, :q)`.
+- Tracked in [issue #3](https://github.com/nainajnahO/rag-knowledge-base/issues/3).
 
 ---
 
@@ -248,7 +272,7 @@ LIMIT 10;
 1. **System prompt forbids external knowledge.** *"Answer using only the provided sources. If they don't contain enough information to answer, say so. Do not use prior knowledge."* The single most important line.
 2. **Refusal allowed and encouraged.** *"If the sources do not contain enough information, say 'I don't have enough information in the provided sources to answer this.'"* Without this, the model stretches to manufacture answers from weak chunks.
 3. **Score threshold gate.** If the top retrieved chunk's similarity is below 0.5 (cosine), don't call the LLM at all — return `{"answer": "No relevant content found in the knowledge base.", "sources": []}`.
-4. **Pass chunk metadata, not just text.** Each chunk in the prompt is preceded by `Title: ... (source_type, published_date)` so the model can contextualize and source-confuse less.
+4. **Pass chunk metadata, not just text.** Each chunk in the prompt is preceded by `Title: <title> (<published_date>)` so the model can contextualize and source-confuse less. The publication date is included to support temporal reasoning and contradiction resolution between sources of different ages.
 
 **Top-K retrieval for chat:** 8 chunks above threshold 0.5. Sweet spot — enough context for nuanced questions without dilution from low-relevance chunks.
 
@@ -263,7 +287,7 @@ LIMIT 10;
       "chunk_id": "uuid",
       "document_id": "uuid",
       "document_title": "Q3 Revenue Memo",
-      "source_type": "memo",
+      "metadata": {"type": "memo", "department": "finance"},
       "published_date": "2025-10-15",
       "score": 0.87,
       "text": "Revenue grew 12% in Q3 to $4.2M..."
@@ -377,6 +401,7 @@ Each of these will become a GitHub Issue and an entry in the README's "next step
 | **Streaming responses on /chat** | Brief lists it as stretch. Demo is via curl; streaming complicates citation parsing for the reviewer. | ~few hours |
 | **Re-ranking with a cross-encoder** | Real quality improvement but adds a dependency and another model API. RRF gets us most of the way there. | ~half-day |
 | **Knowledge graph (entities + relations)** | Genuinely interesting, big rabbit hole. Not the foundation the brief asks for. | ~2-3 days |
+| **Per-document language tracking for multilingual lexical ranking** ([#3](https://github.com/nainajnahO/rag-knowledge-base/issues/3)) | Hybrid uses `'simple'` tsv config — covers any language adequately but skips per-language morphology and stop-word lift. Real per-language lexical morphology needs per-doc language detection. See §7.1. | ~half-day |
 | **Production logging/metrics/CI** | Brief explicitly excludes these. | n/a |
 
 ---
@@ -386,7 +411,7 @@ Each of these will become a GitHub Issue and an entry in the README's "next step
 PRs are sized to be individually reviewable. Each merges to `main` with a merge commit (not squash) so individual commits survive.
 
 1. **PR 1** — Scaffold: `.gitignore`, `pyproject.toml` (uv, Python 3.14), `docker-compose.yml`, `app/main.py` with `/health`, `.env.example`, README skeleton.
-2. **PR 2** — Schema: `init.sql` with documents/chunks tables, pgvector extension, HNSW + GIN indexes.
+2. **PR 2** — Schema: `sql/schema.sql` with `documents` and `chunks` tables, pgvector extension, HNSW vector index, and GIN index on JSONB metadata. Auto-applied on first container init via `/docker-entrypoint-initdb.d/`. Lexical-ranking column (`tsv` + GIN) deferred to PR 7.
 3. **PR 3** — `POST /text` end-to-end: chunker module, Voyage embedder module, persistence.
 4. **PR 4** — `POST /document`: pymupdf extraction + content-hash dedupe.
 5. **PR 5** — `GET /search`: vector similarity with metadata filters via JOIN.
