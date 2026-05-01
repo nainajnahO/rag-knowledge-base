@@ -55,3 +55,10 @@ def embed_chunks(chunks: list[Chunk], input_type: str = "document") -> list[list
 
 def count_tokens(texts: list[str]) -> int:
     return _get_client().count_tokens(texts, model=settings.embedding_model)
+
+
+def per_text_token_counts(texts: list[str]) -> list[int]:
+    if not texts:
+        return []
+    encodings = _get_client().tokenize(texts, model=settings.embedding_model)
+    return [len(e.tokens) for e in encodings]
