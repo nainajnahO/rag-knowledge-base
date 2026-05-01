@@ -31,6 +31,4 @@ Thumbs.db
 
 # Project
 *.pdf
-
-# Docker
-postgres-data/
+!tests/fixtures/*.pdf
