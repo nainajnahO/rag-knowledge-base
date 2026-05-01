@@ -58,5 +58,14 @@ def count_tokens(texts: list[str]) -> int:
 def per_text_token_counts(texts: list[str]) -> list[int]:
     if not texts:
         return []
-    encodings = _get_client().tokenize(texts, model=settings.embedding_model)
-    return [len(e.tokens) for e in encodings]
+    return [len(e.tokens) for e in tokenize(texts)]
+
+
+def tokenize(texts: list[str]):
+    """Return Voyage's HuggingFace `Encoding` objects for each text.
+
+    Each encoding exposes `.tokens`, `.ids`, and `.offsets` (a list of
+    (char_start, char_end) tuples per token). The chunker uses `.offsets`
+    to slice text by token boundary when no semantic separator applies.
+    """
+    return _get_client().tokenize(texts, model=settings.embedding_model)

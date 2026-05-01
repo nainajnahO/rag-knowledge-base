@@ -64,7 +64,7 @@ This is a working artifact — written for the reviewer and for ourselves.
 
 ## 3. Chunking strategy
 
-**Decision:** Recursive token-based splitting (paragraph → sentence → word fallback) for both `/text` and `/document` endpoints. **600 tokens per chunk, 15% overlap (~90 tokens).** Token counting via Voyage's tokenizer, not characters.
+**Decision:** Recursive token-based splitting (paragraph → sentence → word → token-offset fallback) for both `/text` and `/document` endpoints. **600 tokens per chunk, 15% overlap (~90 tokens).** Token counting via Voyage's tokenizer, not characters.
 
 **Alternatives considered:**
 - Fixed character/token splits (rejected — cuts mid-word/sentence)
@@ -77,6 +77,10 @@ This is a working artifact — written for the reviewer and for ourselves.
 - Recursive splitting respects natural boundaries when possible while keeping chunk sizes predictable; LangChain-style splitter is well-understood, ~30 lines or one library call.
 - 600 tokens because Voyage embeddings are trained for general text in this range; memos/reports rarely have meaningful units shorter than ~150 tokens (paragraph) or longer than ~700 (a few paragraphs). 600 is the middle, keeping citations precise enough to spot-check.
 - 15% overlap because boundary-straddling sentences would otherwise be split across chunks and missed by retrieval; 0% loses content, 25%+ inflates results with near-duplicates.
+
+**Why custom code instead of `langchain-text-splitters`:** LangChain's `RecursiveCharacterTextSplitter` accepts a `length_function`, so it can be configured to be token-based. Honest tradeoff: ~60 lines of custom code vs. a small dependency. We chose custom to keep the chunking strategy fully visible in the codebase, avoid LangChain's package-restructuring history, and minimize dependency footprint. A swap is mechanical if multilingual or hierarchical chunking ever justifies the dependency.
+
+**Multilingual fallback (token-offset slicing).** The semantic separators (`\n\n`, `\n`, `. `, ` `) are Latin-script-biased — CJK languages without inter-word spaces, or any contiguous block, would otherwise survive recursion intact and either truncate at Voyage's 32K-token input cap or produce one oversize chunk per document. The deepest fallback (`_token_slice` in `app/chunking.py`) uses Voyage's tokenizer to read each token's `(char_start, char_end)` offset and slices the text into `OVERLAP_TOKENS`-sized pieces by character index. The packer then produces correctly-sized windows with overlap from those small pieces, exactly as it does for separator-derived pieces. Result: chunks are ≤ MAX_TOKENS in any language, overlap is preserved at chunk boundaries, the embedding never gets a >32K-token input. Not as semantically aligned as Latin-text chunking (boundaries can fall mid-word in any language; mid-sentence in CJK), but functionally correct everywhere.
 
 **Migration notes — recursive flat → parent-child (1 focused day if architecture is clean):**
 - Schema: add `parent_id` column on `chunks` referencing another row (or a separate `parent_chunks` table).

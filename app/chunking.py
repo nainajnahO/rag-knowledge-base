@@ -1,14 +1,14 @@
-from app.embeddings import per_text_token_counts
+from app.embeddings import per_text_token_counts, tokenize
 from app.models import Chunk
 
 # Per DECISIONS.md §3: recursive token-based splitting, 600 tokens / 15% overlap.
+# Separators are Latin-script-biased; for any piece they fail to split (e.g.
+# CJK text without spaces, or any contiguous block), the deepest-fallback
+# `_token_slice` slices by token offset from Voyage's tokenizer so chunks are
+# still correctly sized in any language.
 SEPARATORS = ["\n\n", "\n", ". ", " "]
 MAX_TOKENS = 600
 OVERLAP_TOKENS = 90
-# Voyage truncates inputs to 32K tokens (truncation=True default). When an
-# unsplittable piece exceeds this, only the first VOYAGE_INPUT_TOKEN_CAP tokens
-# are actually embedded; cap the persisted token_count to reflect that.
-VOYAGE_INPUT_TOKEN_CAP = 32_000
 
 
 def chunk_text(text: str) -> list[Chunk]:
@@ -23,9 +23,11 @@ def chunk_text(text: str) -> list[Chunk]:
     windows = _pack_with_overlap(pieces, piece_counts)
 
     # Re-tokenize final joined chunks for exact persisted token_count.
+    # The token-offset fallback guarantees no piece exceeds MAX_TOKENS, so
+    # the previous Voyage-truncation cap on token_count is no longer needed.
     final_counts = per_text_token_counts(windows)
     return [
-        Chunk(text=w, ordinal=i, token_count=min(c, VOYAGE_INPUT_TOKEN_CAP))
+        Chunk(text=w, ordinal=i, token_count=c)
         for i, (w, c) in enumerate(zip(windows, final_counts))
     ]
 
@@ -49,12 +51,36 @@ def _split_recursive(texts: list[str], sep_idx: int) -> list[str]:
             sub_pieces = [p for p in sub_pieces if p.strip()]
             result.extend(_split_recursive(sub_pieces, sep_idx + 1))
         else:
-            # Past the deepest separator with an oversize piece. Voyage's
-            # truncation=True default caps the embedding input at 32K tokens,
-            # so the chunk is still embeddable; we just persist it as-is.
-            result.append(text)
+            # No semantic separator applies (e.g. CJK text without spaces, or
+            # any contiguous block). Slice on token offset into small pieces so
+            # the packer handles them uniformly — produces correct sizing AND
+            # overlap in any language.
+            result.extend(_token_slice(text, OVERLAP_TOKENS))
 
     return result
+
+
+def _token_slice(text: str, piece_tokens: int) -> list[str]:
+    """Slice `text` into pieces of at most `piece_tokens` by token-character offset.
+
+    Uses Voyage's tokenizer to find each token's character span, then walks the
+    spans in `piece_tokens`-sized strides, taking `text[char_start:char_end]`
+    for each stride. Pieces are non-overlapping char slices, so the packer
+    later layers MAX_TOKENS-windowing and OVERLAP_TOKENS-overlap on top
+    uniformly with separator-derived pieces.
+    """
+    encoding = tokenize([text])[0]
+    offsets = encoding.offsets
+    if len(offsets) <= piece_tokens:
+        return [text]
+
+    pieces: list[str] = []
+    for start in range(0, len(offsets), piece_tokens):
+        end = min(start + piece_tokens, len(offsets))
+        char_start = offsets[start][0]
+        char_end = offsets[end - 1][1]
+        pieces.append(text[char_start:char_end])
+    return pieces
 
 
 def _split_keeping_sep(text: str, sep: str) -> list[str]:
