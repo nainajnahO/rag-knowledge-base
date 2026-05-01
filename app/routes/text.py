@@ -36,7 +36,16 @@ def ingest_text(req: IngestTextRequest, conn: psycopg.Connection = Depends(get_c
 
     try:
         embeddings = embed_chunks(chunks)
+    except voyageai.error.AuthenticationError as exc:
+        # Server misconfig (missing/invalid VOYAGE_API_KEY) — surface as 500 so
+        # operators don't mistake it for a transient upstream issue.
+        raise HTTPException(status_code=500, detail=f"embedding auth failure: {exc}") from exc
+    except voyageai.error.RateLimitError as exc:
+        raise HTTPException(status_code=429, detail=f"embedding rate limited: {exc}") from exc
+    except voyageai.error.InvalidRequestError as exc:
+        raise HTTPException(status_code=400, detail=f"embedding rejected input: {exc}") from exc
     except voyageai.error.VoyageError as exc:
+        # Timeout / ServiceUnavailable / generic upstream — transient, 503.
         raise HTTPException(status_code=503, detail=f"embedding upstream failure: {exc}") from exc
 
     try:
