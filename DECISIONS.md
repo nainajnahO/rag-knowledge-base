@@ -217,6 +217,8 @@ PyMuPDF is dual-licensed: AGPL by default, with a commercial license available f
 - Industry standard in 2026 (Elastic, Vespa, Weaviate, Qdrant all default to RRF).
 - One SQL query with two CTEs and a JOIN — ~20 lines, no Python-side merging.
 
+In the SQL sketch below, `$1` is the query embedding, produced by the same embedder module used during ingestion but called with `input_type="query"` per §2's API usage notes; `$2` is the raw query string.
+
 **Implementation sketch** *(the `tsv` column referenced below lands later, in the hybrid-search step (build sequence §16, item 7); the must-have schema omits it)*:
 
 ```sql
