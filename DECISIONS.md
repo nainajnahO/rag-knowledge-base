@@ -27,25 +27,35 @@ This is a working artifact — written for the reviewer and for ourselves.
 
 ## 2. Embedding model
 
-**Decision:** Voyage `voyage-3`, 1024 dimensions, cosine distance.
+**Decision:** Voyage `voyage-4`, 1024 dimensions, cosine distance.
 
 **Alternatives considered:**
-- `voyage-3-lite` (512 dim, ~3x cheaper, lower quality)
-- `voyage-3-large` (1024 dim, ~3x more expensive, marginal quality gain on general English)
-- `voyage-context-3` (1024 dim, contextual embeddings — each chunk's embedding incorporates surrounding-document context)
-- OpenAI `text-embedding-3-small` (1536 dim)
-- Local sentence-transformers model
+- `voyage-4-large` (same 1024-dim default with Matryoshka 256/512/2048; "best general-purpose & multilingual" tier — rejected as overshooting; "biggest model" needs corpus-specific benchmarks to defend, which a take-home doesn't have)
+- `voyage-4-lite` (same dim options; "optimized for latency and cost" tier — rejected as undershooting on a quality-graded RAG eval where cost differences are pennies)
+- `voyage-4-nano` (open-weight, smallest of the 4-series — interesting but no meaningful advantage over `voyage-4` here)
+- `voyage-context-3` (1024-dim, contextual embeddings — each chunk's embedding incorporates surrounding-document context; deferred per migration notes below)
+- `voyage-3` / `voyage-3.5` / `voyage-3-large` (previous generation per Voyage's own docs — Voyage explicitly recommends migrating to the 4-series; no reason to ship stale)
+- OpenAI `text-embedding-3-small` (1536 dim — cross-vendor option; rejected to keep the "Anthropic stack end-to-end" narrative)
+- Local sentence-transformers model (no inference infra; rejected)
 
 **Why this choice:**
-- `voyage-3` is the defensible mid-tier default — quality/cost balance with no over- or under-shooting.
+- `voyage-4` is Voyage's labelled general-purpose default for retrieval — using the recommended default is a stronger story than picking the biggest tier and defending it.
 - Voyage is Anthropic's recommended embedding partner; clean README narrative ("used Anthropic's stack end-to-end").
-- 1024 dimensions is a clean column type for pgvector with no storage bloat.
-- Cosine because Voyage's docs explicitly recommend it (their embeddings aren't unit-normalized).
+- 1024 dimensions is a clean column type for pgvector with no storage bloat. Matryoshka variants (256/512/2048) are available without a model swap if storage or speed ever becomes a real constraint.
+- Cosine via pgvector's `<=>` operator. voyage-4 embeddings are L2-normalized (per Voyage's docs: *"Voyage embeddings are normalized to length 1, therefore dot-product and cosine similarity are the same"*), so cosine, dot product, and Euclidean rank identically; cosine is the conventional choice and matches Voyage's documentation examples.
+- 32K-token per-input context length is far above our 600-token chunks — no risk of truncation.
 
-**Migration notes — voyage-3 → voyage-context-3 later (cheap):**
-- Same dimension (1024) → **no schema migration**.
+**API usage notes (load-bearing for the embedder module):**
+- **Always pass `input_type`.** Voyage prepends a different internal prompt depending on whether the text is being embedded as a *document* (for indexing) or as a *query* (for retrieval). Skipping `input_type` works but produces weaker retrieval. The embedder module's signature is `embed_chunks(chunks, input_type="document") -> list[list[float]]`; ingestion calls it with the default, search/chat (PR 5/6) call it with `input_type="query"`. Embeddings produced with vs without `input_type` are still mutually compatible — this is purely a quality lever.
+- **Per-request caps for voyage-4:** ≤1,000 inputs AND ≤320,000 tokens per `/v1/embeddings` call. The embedder module owns sub-batching and enforces both ceilings simultaneously. With 600-token chunks, the token cap binds first at ~533 chunks per call; almost no real document hits either limit in one batch.
+- **`output_dtype="float"`** (the default) — full-precision 32-bit embeddings. Quantized variants (int8 / binary) save storage but lose recall; not worth the complexity at this scale.
+- **`truncation=True`** (the default) — silent truncation at 32K tokens per input. Our chunks are 600 tokens, so this never trips, but the default is the safe one anyway.
+
+**Migration notes — voyage-4 → voyage-context-3 later (cheap):**
+- Same default dimension (1024) → **no schema migration**.
 - Same distance metric → no retrieval code change.
-- Embedder module changes (~30 lines): the API takes document-grouped chunk lists, not an arbitrary list of strings.
+- Embedder module changes (~30 lines): different SDK method (`vo.contextualized_embed(...)`), different REST endpoint (`/v1/contextualizedembeddings`), and the API takes document-grouped chunk lists (`List[List[str]]`) rather than a flat list of strings.
+- Tighter per-request caps: ≤1,000 inputs / ≤120K tokens / ≤16K chunks total — embedder's sub-batching needs to track all three.
 - Ingestion pipeline must batch chunks **by document** (which is the natural flow anyway — one doc per upload).
 - Re-embed all existing chunks (cents at this scale).
 - Total effort: roughly half a day of focused work.
@@ -241,9 +251,9 @@ The `tsvector` column needs a Postgres text-search config that governs tokenizat
 
 **Why `'simple'`:**
 - The lexical lane's main value-add in our hybrid is exact-term matching (proper nouns, codes, acronyms, technical jargon). `'simple'` delivers that for any language.
-- The morphology and stop-word lift of a language-specific config (`"policies"` matching `"policy"`) is partially absorbed by voyage-3 in the dense lane — semantically equivalent inflections produce nearby vectors.
+- The morphology and stop-word lift of a language-specific config (`"policies"` matching `"policy"`) is partially absorbed by voyage-4 in the dense lane — semantically equivalent inflections produce nearby vectors.
 - The brief is silent on language. `'english'` would be a bet that *penalizes* non-English content rather than just leaving it un-optimized.
-- Cross-language retrieval is unaffected by this choice — voyage-3 (multilingual) carries that case through the dense lane regardless of what we put in the lexical lane.
+- Cross-language retrieval is unaffected by this choice — voyage-4 (multilingual) carries that case through the dense lane regardless of what we put in the lexical lane.
 
 **Migration notes — `'simple'` → per-document language tracking (~half-day):**
 - Add `language regconfig NOT NULL` on `documents` (default `'simple'`) — detected at upload via a small library (`langdetect`, `fasttext-langid`) or supplied by the client.
@@ -399,9 +409,9 @@ Each of these will become a GitHub Issue and an entry in the README's "next step
 | **Multi-turn /chat with query rewriting** | Real complexity is in the query rewriter, not the API. Brief asks for single-turn. | ~1 day |
 | **Structure-aware PDF chunking via docling** | Chose plain-text recursive chunking as the baseline. docling adds ML model deps. | ~half-day |
 | **Parent-child / hierarchical chunking** | Real retrieval-quality win, but complicates retrieval and chat. Architecture is designed to make it cheap. | ~1 day |
-| **voyage-context-3 contextual embeddings** | Same dimension as voyage-3 → cheap migration. Better story to ship voyage-3 first. | ~half-day |
+| **voyage-context-3 contextual embeddings** | Same dimension as voyage-4 → cheap migration. Better story to ship the standard voyage-4 model first; document-grouped batching adds complexity worth deferring. | ~half-day |
 | **Streaming responses on /chat** | Brief lists it as stretch. Demo is via curl; streaming complicates citation parsing for the reviewer. | ~few hours |
-| **Re-ranking with a cross-encoder** | Real quality improvement but adds a dependency and another model API. RRF gets us most of the way there. | ~half-day |
+| **Re-ranking with a cross-encoder** (Voyage `rerank-2.5`) | Real quality improvement but adds a dependency and another model API. RRF gets us most of the way there. Voyage's `rerank-2.5` (32K context, multilingual, instruction-following) is the natural drop-in given the rest of the stack. | ~half-day |
 | **Knowledge graph (entities + relations)** | Genuinely interesting, big rabbit hole. Not the foundation the brief asks for. | ~2-3 days |
 | **Per-document language tracking for multilingual lexical ranking** ([#3](https://github.com/nainajnahO/rag-knowledge-base/issues/3)) | Hybrid uses `'simple'` tsv config — covers any language adequately but skips per-language morphology and stop-word lift. Real per-language lexical morphology needs per-doc language detection. See §7.1. | ~half-day |
 | **Production logging/metrics/CI** | Brief explicitly excludes these. | n/a |
