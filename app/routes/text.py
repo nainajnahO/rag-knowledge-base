@@ -22,12 +22,16 @@ def ingest_text(req: IngestTextRequest, conn: psycopg.Connection = Depends(get_c
     content_hash = sha256(text.encode("utf-8")).hexdigest()
 
     with conn.cursor() as cur:
-        cur.execute("SELECT id FROM documents WHERE content_hash = %s", (content_hash,))
+        cur.execute(
+            """
+            SELECT id, (SELECT count(*) FROM chunks WHERE document_id = documents.id)
+            FROM documents WHERE content_hash = %s
+            """,
+            (content_hash,),
+        )
         row = cur.fetchone()
         if row is not None:
-            existing_id = row[0]
-            cur.execute("SELECT count(*) FROM chunks WHERE document_id = %s", (existing_id,))
-            n_chunks = cur.fetchone()[0]
+            existing_id, n_chunks = row
             return IngestTextResponse(document_id=existing_id, n_chunks=n_chunks)
 
     chunks = chunk_text(text)
