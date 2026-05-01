@@ -49,7 +49,7 @@ Requires Docker, `uv`, and Python 3.14 (uv will manage Python automatically if y
 
 | Method | Path        | Status     |
 |--------|-------------|------------|
-| GET    | `/health`   | ✅ live    |
+| GET    | `/health`   | live       |
 | POST   | `/text`     | PR 3       |
 | POST   | `/document` | PR 4       |
 | GET    | `/search`   | PR 5       |
