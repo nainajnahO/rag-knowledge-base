@@ -45,7 +45,7 @@ Requires Docker, `uv`, and Python 3.14 (uv will manage Python automatically if y
 
 ---
 
-## API reference
+## Endpoints (status)
 
 | Method | Path        | Status     |
 |--------|-------------|------------|
