@@ -31,6 +31,3 @@ Thumbs.db
 
 # Project
 *.pdf
-
-# Docker
-postgres-data/
