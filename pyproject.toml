@@ -1,0 +1,31 @@
+[project]
+name = "ahody-rag-worksample"
+version = "0.1.0"
+description = "Ahody take-home: RAG knowledge base (FastAPI + Postgres+pgvector + Voyage + Anthropic)"
+requires-python = ">=3.14"
+readme = "README.md"
+dependencies = [
+    "anthropic>=0.97.0",
+    "fastapi>=0.136.1",
+    "pgvector>=0.4.2",
+    "psycopg[binary]>=3.3.3",
+    "pydantic>=2.13.3",
+    "pydantic-settings>=2.14.0",
+    "pymupdf>=1.27.2.3",
+    "python-multipart>=0.0.27",
+    "uvicorn[standard]>=0.46.0",
+    "voyageai>=0.3.7",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.0.3",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
