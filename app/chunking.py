@@ -68,6 +68,12 @@ def _token_slice(text: str, piece_tokens: int) -> list[str]:
     for each stride. Pieces are non-overlapping char slices, so the packer
     later layers MAX_TOKENS-windowing and OVERLAP_TOKENS-overlap on top
     uniformly with separator-derived pieces.
+
+    Language-agnostic: Voyage's BPE tokenizer is unicode-aware and produces
+    character-indexed offsets covering all input. Verified empirically for
+    English, Japanese, Arabic, Hebrew, Thai, mixed scripts, and emoji-heavy
+    text — every case yielded 100% offset coverage and exact reconstruction
+    via "".join.
     """
     encoding = tokenize([text])[0]
     offsets = encoding.offsets
