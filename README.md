@@ -41,7 +41,7 @@ Requires Docker, `uv`, and Python 3.14 (uv will manage Python automatically if y
 
 ## Data model
 
-Two tables: `documents` (one row per uploaded source — title, author, published date, content hash for dedupe, plus a JSONB `metadata` column for arbitrary categorical tagging) and `chunks` (one row per retrievable text chunk, each with its 1024-dim embedding from voyage-3 and a foreign key back to its document).
+Two tables: `documents` (one row per uploaded source — title, author, published date, content hash for dedupe, plus a JSONB `metadata` column for arbitrary categorical tagging) and `chunks` (one row per retrievable text chunk, each with its 1024-dim embedding from voyage-4 and a foreign key back to its document).
 
 The full schema lives in [`sql/schema.sql`](./sql/schema.sql) and is applied automatically by Postgres on first container init (mounted into `/docker-entrypoint-initdb.d/`). See [`DECISIONS.md`](./DECISIONS.md) §4 for the rationale and tradeoffs, and §7 for the lexical-ranking column added later in the hybrid-search step.
 
