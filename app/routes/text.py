@@ -3,10 +3,10 @@ from hashlib import sha256
 
 import psycopg
 import voyageai
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 
 from app.chunking import chunk_text
-from app.db import get_conn
+from app.db import ConnDep
 from app.embeddings import embed_chunks
 from app.models import IngestTextRequest, IngestTextResponse
 
@@ -14,7 +14,7 @@ router = APIRouter()
 
 
 @router.post("/text", response_model=IngestTextResponse)
-def ingest_text(req: IngestTextRequest, conn: psycopg.Connection = Depends(get_conn)) -> IngestTextResponse:
+def ingest_text(req: IngestTextRequest, conn: ConnDep) -> IngestTextResponse:
     text = req.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is empty after stripping whitespace")
