@@ -28,6 +28,7 @@ def close_pool() -> None:
 
 
 def get_conn() -> Iterator[Connection]:
-    assert pool is not None, "connection pool not initialized; check FastAPI lifespan"
+    if pool is None:
+        raise RuntimeError("connection pool not initialized; check FastAPI lifespan")
     with pool.connection() as conn:
         yield conn
