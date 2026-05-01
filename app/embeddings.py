@@ -1,6 +1,7 @@
 from functools import cache
 
 import voyageai
+from tokenizers import Encoding
 
 from app.models import Chunk
 from app.settings import settings
@@ -61,7 +62,7 @@ def per_text_token_counts(texts: list[str]) -> list[int]:
     return [len(e.tokens) for e in tokenize(texts)]
 
 
-def tokenize(texts: list[str]):
+def tokenize(texts: list[str]) -> list[Encoding]:
     """Return Voyage's HuggingFace `Encoding` objects for each text.
 
     Each encoding exposes `.tokens`, `.ids`, and `.offsets` (a list of
