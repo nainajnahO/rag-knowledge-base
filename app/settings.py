@@ -9,5 +9,7 @@ class Settings(BaseSettings):
     voyage_api_key: str = ""
     anthropic_api_key: str = ""
 
+    embedding_model: str = "voyage-4"
+
 
 settings = Settings()
