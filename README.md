@@ -11,8 +11,8 @@ Design decisions and the alternatives considered are documented in [`DECISIONS.m
 ## How to run
 
 ```bash
-# 1. Start Postgres + pgvector
-docker compose up -d
+# 1. Start Postgres + pgvector (fresh-init applies the schema)
+docker compose down -v && docker compose up -d
 
 # 2. Install Python deps (uv reads pyproject.toml + .python-version)
 uv sync
@@ -41,7 +41,15 @@ Requires Docker, `uv`, and Python 3.14 (uv will manage Python automatically if y
 
 ## Data model
 
-> _Filled in PR 2._ See [`DECISIONS.md`](./DECISIONS.md) §4 for the schema.
+Two tables: `documents` (one row per uploaded source — title, author, published date, content hash for dedupe, plus a JSONB `metadata` column for arbitrary categorical tagging) and `chunks` (one row per retrievable text chunk, each with its 1024-dim embedding from voyage-3 and a foreign key back to its document).
+
+The full schema lives in [`sql/schema.sql`](./sql/schema.sql) and is applied automatically by Postgres on first container init (mounted into `/docker-entrypoint-initdb.d/`). See [`DECISIONS.md`](./DECISIONS.md) §4 for the rationale and tradeoffs, and §7 for the lexical-ranking column added later in the hybrid-search step.
+
+To reset the database during development (drops all data and re-applies the schema):
+
+```bash
+docker compose down -v && docker compose up -d
+```
 
 ---
 
