@@ -17,9 +17,10 @@ docker compose down -v && docker compose up -d
 # 2. Install Python deps (uv reads pyproject.toml + .python-version)
 uv sync
 
-# 3. Copy env template and fill in API keys
-cp .env.example .env
-# edit .env: VOYAGE_API_KEY, ANTHROPIC_API_KEY
+# 3. Create a .env file at the project root with:
+#      DATABASE_URL=postgresql://ahody:ahody@localhost:5432/ahody
+#      VOYAGE_API_KEY=<your key>          # https://www.voyageai.com
+#      ANTHROPIC_API_KEY=<your key>       # https://console.anthropic.com (needed for /chat)
 
 # 4. Run the API
 uv run uvicorn app.main:app --reload
@@ -27,9 +28,23 @@ uv run uvicorn app.main:app --reload
 # 5. Sanity-check
 curl http://localhost:8000/health
 # → {"status":"ok"}
+
+# 6. Ingest a document
+curl -X POST http://localhost:8000/text \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Q3 Revenue Memo",
+    "text": "Revenue grew 12% in Q3 to $4.2M, driven by enterprise contracts.",
+    "author": "Finance Team",
+    "published_date": "2025-10-15",
+    "metadata": {"type": "memo", "department": "finance"}
+  }'
+# → {"document_id": "...", "n_chunks": 1}
 ```
 
 Requires Docker, `uv`, and Python 3.14 (uv will manage Python automatically if you don't have it).
+
+> **Dedupe behavior (`POST /text`).** If the request's `text` matches an already-ingested document (by SHA-256 content hash, applied after stripping leading/trailing whitespace), the existing `document_id` is returned and **any new `title`, `author`, `published_date`, or `metadata` in the request is ignored** — the stored row keeps its original values. This is intentional idempotent behavior (`DECISIONS.md` §12). If you need to update metadata on an existing document, that's out of scope for this endpoint.
 
 ---
 
@@ -58,7 +73,7 @@ docker compose down -v && docker compose up -d
 | Method | Path        | Status     |
 |--------|-------------|------------|
 | GET    | `/health`   | live       |
-| POST   | `/text`     | PR 3       |
+| POST   | `/text`     | live       |
 | POST   | `/document` | PR 4       |
 | GET    | `/search`   | PR 5       |
 | POST   | `/chat`     | PR 6       |
