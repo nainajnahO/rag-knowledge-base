@@ -1,5 +1,7 @@
 from collections.abc import Iterator
+from typing import Annotated
 
+from fastapi import Depends
 from pgvector.psycopg import register_vector
 from psycopg import Connection
 from psycopg_pool import ConnectionPool
@@ -32,3 +34,8 @@ def get_conn() -> Iterator[Connection]:
         raise RuntimeError("connection pool not initialized; check FastAPI lifespan")
     with pool.connection() as conn:
         yield conn
+
+
+# Reusable Annotated-style FastAPI dependency for route signatures.
+# Routes import as `from app.db import ConnDep` and write `conn: ConnDep`.
+ConnDep = Annotated[Connection, Depends(get_conn)]
