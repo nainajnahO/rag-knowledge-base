@@ -1,7 +1,7 @@
 services:
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: ahody-postgres
+    container_name: rag-kb-postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: ahody

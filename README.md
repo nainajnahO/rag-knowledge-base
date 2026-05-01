@@ -1,8 +1,8 @@
-# Ahody RAG — Work Sample
+# RAG Knowledge Base
 
 A small retrieval-augmented-generation (RAG) backend: upload documents (plain text or PDF), index them, search them, and chat against them with verifiable source citations.
 
-Built as a hiring work sample. Design decisions and the alternatives considered are documented in [`DECISIONS.md`](./DECISIONS.md).
+Design decisions and the alternatives considered are documented in [`DECISIONS.md`](./DECISIONS.md).
 
 > **Status:** scaffolding in place; feature endpoints land PR-by-PR. See the build sequence in DECISIONS.md §16.
 

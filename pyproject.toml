@@ -1,7 +1,7 @@
 [project]
-name = "ahody-rag-worksample"
+name = "rag-knowledge-base"
 version = "0.1.0"
-description = "Ahody take-home: RAG knowledge base (FastAPI + Postgres+pgvector + Voyage + Anthropic)"
+description = "RAG knowledge base — upload docs, hybrid search, chat with verifiable citations. FastAPI · Postgres+pgvector · Voyage · Anthropic."
 requires-python = ">=3.14"
 readme = "README.md"
 dependencies = [
