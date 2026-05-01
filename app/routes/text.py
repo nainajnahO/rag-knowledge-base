@@ -4,7 +4,6 @@ from hashlib import sha256
 import psycopg
 import voyageai
 from fastapi import APIRouter, Depends, HTTPException
-from pgvector.psycopg import register_vector
 
 from app.chunking import chunk_text
 from app.db import get_conn
@@ -22,7 +21,6 @@ def ingest_text(req: IngestTextRequest, conn: psycopg.Connection = Depends(get_c
 
     content_hash = sha256(text.encode("utf-8")).hexdigest()
 
-    register_vector(conn)
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM documents WHERE content_hash = %s", (content_hash,))
         row = cur.fetchone()

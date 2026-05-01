@@ -1,5 +1,6 @@
 from collections.abc import Iterator
 
+from pgvector.psycopg import register_vector
 from psycopg import Connection
 from psycopg_pool import ConnectionPool
 
@@ -10,7 +11,13 @@ pool: ConnectionPool | None = None
 
 def open_pool() -> None:
     global pool
-    pool = ConnectionPool(settings.database_url, min_size=1, max_size=10, open=True)
+    pool = ConnectionPool(
+        settings.database_url,
+        min_size=1,
+        max_size=10,
+        configure=register_vector,
+        open=True,
+    )
 
 
 def close_pool() -> None:
