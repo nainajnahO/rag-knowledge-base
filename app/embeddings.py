@@ -1,3 +1,5 @@
+from functools import cache
+
 import voyageai
 
 from app.models import Chunk
@@ -7,14 +9,10 @@ from app.settings import settings
 MAX_INPUTS_PER_REQUEST = 1000
 MAX_TOKENS_PER_REQUEST = 320_000
 
-_client: voyageai.Client | None = None
 
-
+@cache
 def _get_client() -> voyageai.Client:
-    global _client
-    if _client is None:
-        _client = voyageai.Client(api_key=settings.voyage_api_key or None)
-    return _client
+    return voyageai.Client(api_key=settings.voyage_api_key or None)
 
 
 def embed_chunks(chunks: list[Chunk], input_type: str = "document") -> list[list[float]]:
