@@ -134,7 +134,9 @@ CREATE TABLE chunks (
     embedding    vector(1024) NOT NULL,
     UNIQUE (document_id, ordinal)
 );
-CREATE INDEX idx_chunks_embedding ON chunks USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX idx_chunks_embedding
+    ON chunks USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
 ```
 
 The `tsv` column and its GIN index land later, in the hybrid-search step (build sequence §16, item 7). They're scaffolding for the optional lexical lane and don't belong in the must-have schema.
