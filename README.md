@@ -53,7 +53,7 @@ curl -X POST http://localhost:8000/document \
 
 Requires Docker, `uv`, and Python 3.14 (uv will manage Python automatically if you don't have it).
 
-> **Dedupe behavior (both endpoints).** Both `/text` and `/document` dedupe on the SHA-256 of the **extracted text** (after stripping whitespace), so uploading the same content twice — including the same memo first as text and then as a PDF — returns the existing `document_id` and creates no new rows. **Any new `title`, `author`, `published_date`, or `metadata` in the second request is ignored** — the stored row keeps its original values. This is intentional idempotent behavior (`DECISIONS.md` §12). If you need to update metadata on an existing document, that's out of scope for these endpoints.
+> **Dedupe behavior (both endpoints).** Both `/text` and `/document` dedupe on the SHA-256 of the stored text (after stripping whitespace), so re-POSTing the same body to the same endpoint returns the existing `document_id` and creates no new rows. **Any new `title`, `author`, `published_date`, or `metadata` in the second request is ignored** — the stored row keeps its original values. This is intentional idempotent behavior (`DECISIONS.md` §12). If you need to update metadata on an existing document, that's out of scope for these endpoints.
 
 > **Upload limits (`POST /document`).** Multipart body cap of 25 MB at the door (returns `413` early, before any extraction work) and a 3,000,000-character cap on the extracted text (returns `422`, same as `/text`'s text cap). The 25 MB body cap also applies to every other endpoint as a safety net but only meaningfully fires here. Full rationale + sizing math in [`DECISIONS.md §17`](./DECISIONS.md#17-upload-size-limits).
 

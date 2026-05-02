@@ -38,7 +38,10 @@ def ingest_document(
     except pymupdf.FileDataError as exc:
         raise HTTPException(status_code=400, detail=f"malformed PDF: {exc}") from exc
 
-    text = text.strip()
+    # PyMuPDF can emit \x00 for unmapped glyphs and certain malformed text
+    # streams. Postgres TEXT/JSONB reject NULs, which would otherwise surface
+    # here as an opaque 500 from psycopg.
+    text = text.replace("\x00", "").strip()
     if not text:
         # Image-only / scanned PDFs without an OCR'd text layer hit this.
         # Per §17 this is a 400 (mirrors /text's empty-after-strip), not 422.
