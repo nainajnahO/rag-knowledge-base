@@ -362,8 +362,9 @@ The `tsvector` column needs a Postgres text-search config that governs tokenizat
 
 **Status codes used explicitly:**
 
-- **422** — Pydantic validation (free).
-- **400** — bad file/input (e.g., empty text, malformed PDF) AND upstream rejection of the input (Voyage `InvalidRequestError`).
+- **422** — Pydantic validation (free). Includes the 3M-character extracted-text cap on both `/text` and `/document` (see §17).
+- **413** — multipart file body exceeds the 25 MB cap on `POST /document` (see §17). Rejected at the door before extraction.
+- **400** — bad file/input (e.g., empty text, malformed PDF, missing `%PDF-` magic bytes) AND upstream rejection of the input (Voyage `InvalidRequestError`).
 - **401** — missing/bad API key (Step 8 — not yet wired).
 - **429** — upstream rate limited (Voyage `RateLimitError`).
 - **500** — server misconfig (e.g., missing/invalid `VOYAGE_API_KEY` surfacing as Voyage `AuthenticationError`). Distinguished from 503 so operators don't mistake a config bug for a transient upstream issue.
@@ -450,3 +451,39 @@ PRs are sized to be individually reviewable. Each merges to `main` with a merge 
 10. **Step 10** — README polish, sample documents demonstrating metadata filtering, curl/Postman collection, opening "deliberate cuts" issues.
 
 If time gets tight, drop Step 7 and Step 8 — they become Issues with explanations, which is also signal.
+
+---
+
+## 17. Upload size limits
+
+**Decision:** Two-layer cap on uploaded content:
+
+- **25 MB file-size cap** on the multipart body of `POST /document`. Returns **413 Payload Too Large**, rejected at the door before the body bytes are read into memory.
+- **3,000,000 character cap on extracted text** on both `POST /text` and `POST /document`. Returns **422 Unprocessable Entity** via Pydantic validation.
+
+**Alternatives considered:**
+
+- **No caps at all.** Simpler but no defense against either RAM blow-up (huge file read into memory before extraction) or runaway embedding cost (huge text → thousands of chunks → many Voyage calls).
+- **File-size cap only.** Catches huge uploads cheaply at the door, but a text-heavy 25 MB PDF can extract to ~20 MB of plain text → ~10,000 chunks at 600 tokens/chunk → real Voyage cost + minutes of latency per upload.
+- **Text-length cap only.** Catches runaway content cost, but a 500 MB PDF still gets fully read into RAM *before* extraction tells us to reject it. The text-length cap fires too late to defend memory.
+- **Tighter file cap (~5 MB) sized to make the text cap unnecessary.** Math: 3M chars of text-heavy PDF ≈ 5 MB file. Aggressive — would reject many legitimate academic papers (image-heavy academic PDFs are routinely 5–10 MB).
+
+**Why two layers:**
+
+- **File-size cap (25 MB)** protects RAM at the door. PyMuPDF reads the whole file into memory before extraction; without a door check, a single malicious upload could exhaust the worker. 25 MB covers any normal document (memos ≤ 100 KB, reports 1–2 MB, image-heavy academic papers 5–10 MB) while bounding worst-case memory at 25 MB *per concurrent request* — multiply by uvicorn's effective concurrency (Starlette's threadpool size, default 40) to get the worker-level ceiling. (DB pool size doesn't gate this; body parsing happens before the conn dep blocks on a pool slot.)
+- **Text-length cap (3M chars)** protects against runaway chunking + embedding cost *after* extraction. At ~4 chars/token, 3M chars ≈ 750K tokens ≈ ~1,400 chunks at 600 tokens/chunk with 15% overlap. Without this cap, a text-heavy 25 MB PDF could produce ~10,000 chunks per upload — real money in Voyage embeddings + minutes of latency.
+- **Symmetry between `/text` and `/document`.** Both endpoints feed the same chunking + embedding + persistence pipeline, so they share the same content limit. A user can't bypass `/text`'s 3M-char cap by repackaging the same content as a PDF.
+
+**Why these specific numbers:**
+
+- **25 MB file cap.** Typical memo: 100 KB. Typical report: 1–2 MB. Image-heavy academic paper: 5–10 MB. Slide decks with embedded raster images: 10–20 MB. 25 MB covers all of these comfortably while still bounding worst-case memory at a manageable ceiling. Round number, easy to remember, easy to widen later if a real document hits the cap.
+- **3M character cap.** ~750K tokens of text → ~1,400 chunks. The largest legitimate single-upload artifact a reviewer would plausibly send is a textbook chapter at ~50K characters; 3M gives 60× headroom while still bounding the worst case at ~$0.15 in Voyage cost per upload (vs. ~$1+ unbounded).
+
+**Implementation:**
+
+- **File-size cap.** Enforced via FastAPI middleware that reads the `Content-Length` header before the multipart body is parsed. Reject early with 413 — never reads the body bytes. (For requests without `Content-Length`, fall back to a streaming-byte counter that aborts at 25 MB.) Middleware is **global** (applies to every endpoint), not path-scoped to `/document`. Free for the other endpoints — `/text` is already bounded by the 3M-char cap (≤ ~12 MB UTF-8 worst case) and `/chat` request bodies are tiny — and avoids a per-path branch in the middleware.
+- **Text-length cap.** Factored as a reusable type alias `MaxText = Annotated[str, Field(min_length=1, max_length=MAX_TEXT_CHARS)]` in `app/limits.py`. `IngestTextRequest.text: MaxText` replaces today's inline `Field(max_length=3_000_000)` at `app/models.py:16`; `/document` re-validates the post-extraction text against `MaxText` directly (no need to construct a full `IngestTextRequest`), so the two endpoints share the cap without coupling their request shapes. Empty extraction is caught *before* `MaxText` validation and raised as **400** (mirroring `/text`'s post-strip check at `app/routes/text.py:19-20`), so the 422 path is reserved for the 3M-char cap and §11's 400 entry remains authoritative for empty-text errors.
+- **Error shape.** Both errors use FastAPI's default `{"detail": "..."}` per §11 — no wrapping, no custom hierarchy.
+- **Where the constants live.** `MAX_UPLOAD_BYTES = 25 * 1024 * 1024`, `MAX_TEXT_CHARS = 3_000_000`, and the `MaxText` type alias all live as module-level definitions in `app/limits.py`. Middleware imports `MAX_UPLOAD_BYTES`; `IngestTextRequest` and `/document`'s post-extraction validation both import `MaxText`. Not surfaced through `Settings` / env vars — these are tied to embedding economics and worker memory, not per-deployment knobs.
+
+**Migration notes:** None — these are operational constants. If a real customer uploads a document that hits either cap, the cap moves (one edit in `app/limits.py`); the *structure* (file cap + text cap, two layers) is the load-bearing decision.
