@@ -20,7 +20,10 @@ router = APIRouter()
 class SearchParams(BaseModel):
     """Bound from query string by FastAPI's Annotated[Model, Query()]."""
 
-    q: str = Field(min_length=1, description="Search query")
+    # max_length=4096 short-circuits absurd queries before they reach Voyage
+    # (the 25 MB body cap doesn't apply to GET URLs, and a meaningful
+    # retrieval query is rarely longer than a paragraph).
+    q: str = Field(min_length=1, max_length=4096, description="Search query")
     k: int = Field(default=10, ge=1, le=50)
     author: str | None = None
     published_after: date | None = None

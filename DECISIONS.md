@@ -209,6 +209,10 @@ PyMuPDF is dual-licensed: AGPL by default, with a commercial license available f
 
 **Migration notes:** none. The GUC is per-transaction; bumping `max_scan_tuples` if very selective filters routinely underfill is a one-line SET inside `retrieve()`.
 
+**Validation gap (honest note):** at the smoke-test corpus size (~5 chunks), the planner picks Seq Scan + Hash Join, not HNSW — `EXPLAIN` confirmed. Iterative scan only engages when the planner has chosen an HNSW Index Scan node, which won't happen until the corpus is large enough that the HNSW path beats brute-force on cost. The mechanism is therefore production-default insurance, not validated empirically at the only scale this code has been tested at. Tracked in [issue #19](https://github.com/nainajnahO/rag-knowledge-base/issues/19) with the three options (document / strip / switch to over-fetch CTE) and what a real verification corpus would look like.
+
+**Score range:** the SELECT computes `1 - (embedding <=> :q)` where `<=>` is cosine distance in `[0, 2]`, so `score ∈ [-1, 1]` mathematically. voyage-4 embeddings are L2-normalized, and natural-language pairs almost always score ≥ 0; negative scores indicate the query and chunk are pointing in opposite directions in vector space (rare in practice).
+
 ---
 
 ## 7. Hybrid search fusion
