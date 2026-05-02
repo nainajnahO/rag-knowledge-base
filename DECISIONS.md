@@ -287,45 +287,112 @@ The `tsvector` column needs a Postgres text-search config that governs tokenizat
 
 ## 8. Citation approach (the load-bearing one)
 
-**Decision:** Numbered inline citations (`[1]`, `[2]`) with the LLM's prompt; the response includes **all** retrieved chunks with full text, score, and document metadata so the reviewer can verify any claim in seconds.
+**Decision:** Anthropic's first-class **Search Result content blocks** with structured citations (`cited_text` returned in API response). Each retrieved chunk becomes a `search_result` block with `citations.enabled = true`; Claude's response is a list of text blocks where cited blocks carry `citations: list[search_result_location]` with verbatim `cited_text`. We pass through Anthropic's native shape rather than remapping into a custom `[N]` numbered-citation scheme.
 
 **Alternatives considered:**
-- Structured JSON output with per-claim `supported_by` arrays (more machine-checkable, more complex prompt + parsing, same underlying hallucination risk)
-- Span-level citation (model returns the exact substring supporting each claim — brittle, models hallucinate spans)
-- Post-hoc verification pass (second LLM call to verify each claim — 2x cost and latency, overkill)
+- **Prompt-based numbered citations (`[1]`, `[2]`)** — what we originally locked. Teach the model `[N]` syntax in the system prompt, parse `[N]` markers from the answer text, map back to chunks. Works, but Anthropic's own evals (their public docs) report this approach hallucinates citations significantly more than their structured-citations feature, and `[N]` is parseable-but-not-guaranteed (the model can fabricate a `[5]` when only 4 chunks exist).
+- **Structured JSON output with per-claim `supported_by` arrays** — incompatible with Citations per Anthropic's docs (a 400 from the API). Skipped on those grounds; would also re-introduce the prompt-engineering verifiability burden.
+- **Span-level citation via prompt** — model returns the exact substring supporting each claim. Brittle; models hallucinate spans. Anthropic's structured citations are precisely this idea, done correctly at the API level.
+- **Post-hoc verification pass** — second LLM call to validate each claim. 2× cost, 2× latency, doesn't add over what Anthropic's structured citations already guarantee.
 
 **Why this choice:**
-- The brief grades "is it actually possible to verify what the LLM says?" — a numbered citation that maps to a chunk in the response makes verification a 10-second action per claim. That *is* the goal.
-- Returning all retrieved chunks (not just cited ones) lets the reviewer see what the model had access to and judge if it cited the right ones — much stronger than "trust me, here's what I cited."
+- The brief grades **"is it actually possible to verify what the LLM says?"** and **"does the system hallucinate?"** Anthropic's structured-citations API is the strongest available answer to both:
+  - `cited_text` is **guaranteed** to be a verbatim substring of the provided chunk (per Anthropic docs: *"citations are guaranteed to contain valid pointers to the provided documents"*).
+  - In Anthropic's published evals, the structured-citations feature *"was found to be significantly more likely to cite the most relevant quotes from documents as compared to purely prompt-based approaches."*
+- Returning all retrieved chunks (not just cited ones) lets the reviewer see what the model had access to and judge if it cited the right ones — preserved from the original §8 intent.
+- The system prompt becomes shorter and easier to audit because the API handles citation formatting; we only have to enforce three guardrails (sources-only, refusal allowed, no speculation).
+- Native Anthropic shapes are passed through to the response (`answer_blocks`) so a client can render claim-with-quote inline if it wants. A flat `answer: str` is also returned for simple display.
 
-**Anti-hallucination guardrails (all four):**
+**Anti-hallucination guardrails (still all four; mechanism shifts):**
 
-1. **System prompt forbids external knowledge.** *"Answer using only the provided sources. If they don't contain enough information to answer, say so. Do not use prior knowledge."* The single most important line.
-2. **Refusal allowed and encouraged.** *"If the sources do not contain enough information, say 'I don't have enough information in the provided sources to answer this.'"* Without this, the model stretches to manufacture answers from weak chunks.
-3. **Score threshold gate.** If the top retrieved chunk's similarity is below 0.5 (cosine), don't call the LLM at all — return `{"answer": "No relevant content found in the knowledge base.", "sources": []}`.
-4. **Pass chunk metadata, not just text.** Each chunk in the prompt is preceded by `Title: <title> (<published_date>)` so the model can contextualize and source-confuse less. The publication date is included to support temporal reasoning and contradiction resolution between sources of different ages.
+1. **System prompt forbids external knowledge.** *"You answer questions using only the provided search results... Do not use prior knowledge. Do not speculate."* The single most important line.
+2. **Refusal allowed and encouraged.** *"If the search results do not contain enough information to answer the question, say: 'I don't have enough information in the provided sources to answer this.'"* In-prompt instruction.
+3. **Score threshold gate (cosine ≥ 0.5).** Lives in the route layer, not the prompt: if `chunks[0].score < 0.5` (or 0 chunks retrieved), don't call Anthropic — return the refusal response with `sources: []`. Saves a ~$0.02 call when retrieval is hopeless.
+4. **Chunk metadata passed automatically.** Each `search_result` block has a `title` field set to `"<doc_title> (<published_date>)"` (date when present). The model sees this natively without any prompt-engineering — no need to inject `Title: ... (date)` headers into chunk text.
 
 **Top-K retrieval for chat:** 8 chunks above threshold 0.5. Sweet spot — enough context for nuanced questions without dilution from low-relevance chunks.
+
+**Per-chunk packaging.** Each retrieved chunk → one `search_result` content block:
+
+```python
+{
+    "type": "search_result",
+    "source": str(chunk.chunk_id),                 # UUID — granularity matches retrieval
+    "title": f"{doc_title} ({published_date})"     # date appended when present
+            if published_date else doc_title,
+    "content": [{"type": "text", "text": chunk.text}],   # one block per chunk
+    "citations": {"enabled": True},
+}
+```
+
+`source = chunk_id` (not `document_id`) because the verifiability story is "this exact quote came from this exact chunk." Citations come back with `source` carrying the same `chunk_id`, so we can do an exact dict lookup `chunk_by_id[citation.source]` to map back.
+
+One block per chunk for this PR. Splitting chunks into sentence-level blocks would give finer citation granularity (`cited_text` is the joined content of `content[start_block_index:end_block_index]`, so finer blocks = shorter cited quotes). Deferred — `cited_text = full chunk` is already verifiable by `grep`-ing our `chunks.text`. Sentence-splitting is a local change in `app/llm.py`'s `build_search_result_block` if/when we want it.
+
+**Request structure (Anthropic's "Method 2: top-level search results"):** user message contains the 8 `search_result` blocks first, then a `text` block with the question. No tool-use loop (Method 1 is for dynamic tool-driven RAG; we have pre-fetched content).
 
 **Response shape:**
 
 ```json
 {
-  "answer": "Per the Q3 memo [1], revenue grew 12% to $4.2M, driven by enterprise contracts [2].",
+  "answer": "Revenue grew 12% in Q3 2025, driven by enterprise contracts.",
+  "answer_blocks": [
+    {
+      "text": "Revenue grew 12% in Q3 2025, driven by enterprise contracts.",
+      "citations": [
+        {
+          "chunk_id": "uuid",
+          "document_title": "Q3 Revenue Memo (2025-10-15)",
+          "cited_text": "Revenue grew 12% in Q3 2025 to $4.2M, driven by enterprise contracts."
+        }
+      ]
+    }
+  ],
   "sources": [
     {
-      "citation": 1,
       "chunk_id": "uuid",
+      "ordinal": 0,
       "document_id": "uuid",
       "document_title": "Q3 Revenue Memo",
-      "metadata": {"type": "memo", "department": "finance"},
+      "author": "Finance Team",
       "published_date": "2025-10-15",
+      "metadata": {"type": "memo", "department": "finance"},
       "score": 0.87,
-      "text": "Revenue grew 12% in Q3 to $4.2M..."
+      "text": "Revenue grew 12% in Q3 2025 to $4.2M, driven by enterprise contracts. The finance team expects continued growth into Q4...",
+      "cited": true,
+      "cited_text": ["Revenue grew 12% in Q3 2025 to $4.2M, driven by enterprise contracts."]
     }
   ]
 }
 ```
+
+`answer` is the concatenation of all `answer_blocks[i].text` for clients that just want a string. `answer_blocks` is Anthropic's native shape (preserving the per-block citation linkage). `sources` is all 8 retrieved chunks (not just cited ones, per the original §8 intent — let the reviewer see what the model had access to). `cited: bool` distinguishes which chunks the model actually grounded claims on; `cited_text: list[str]` carries the verbatim quotes (multiple if the model cited the same chunk in multiple `answer_blocks`).
+
+**Refusal response shape** (top score < 0.5 OR 0 chunks retrieved):
+
+```json
+{
+  "answer": "I don't have enough information in the provided sources to answer this.",
+  "answer_blocks": [
+    {
+      "text": "I don't have enough information in the provided sources to answer this.",
+      "citations": []
+    }
+  ],
+  "sources": []
+}
+```
+
+`sources: []` because we never called Anthropic — the LLM didn't "have access to" anything. If the reviewer wants to see what retrieval found, they can hit `/search?q=<question>` directly.
+
+**Migration notes — one block per chunk → sentence-splitting (~hour, local):**
+- In `app/llm.py.build_search_result_block`, split `chunk.text` into sentences (`pysbd` or simple `re.split`), emit one `{"type": "text", "text": s}` per sentence in the `content` array.
+- No schema migration, no other code changes. `cited_text` becomes shorter and per-claim-precise.
+- Tracked as a follow-up issue if quality demands surface.
+
+**Migration notes — Anthropic structured citations → multi-vendor portability (~half-day):**
+- This locks `/chat` into Anthropic's API shape. If we ever swap LLM providers, we'd need to reimplement citations. §9 already locked Sonnet 4.6 and treats LLM swap as "one config line" — so this isn't really new lock-in.
+- If/when we want to abstract: introduce a `Citation` adapter layer that wraps either Anthropic's structured citations or a prompt-based fallback for other providers. Adds one indirection layer.
 
 ---
 
@@ -343,6 +410,8 @@ The `tsvector` column needs a Postgres text-search config that governs tokenizat
 - Haiku is the sharper "I thought about cost" answer, but only if defended with benchmarks. Without benchmark data, Sonnet is the unimpeachable choice.
 
 **Migration notes:** Model name lives in one config constant / env var. Swapping is one line.
+
+**Constants:** `app/llm.py` exposes `CHAT_MODEL = "claude-sonnet-4-6"` (alias, not a dated snapshot — auto-tracks the latest minor revision; swap to `"claude-sonnet-4-6-YYYYMMDD"` for production reproducibility) and `CHAT_MAX_TOKENS = 2048`.
 
 ---
 
@@ -384,7 +453,13 @@ The `tsvector` column needs a Postgres text-search config that governs tokenizat
 - **500** — server misconfig (e.g., missing/invalid `VOYAGE_API_KEY` surfacing as Voyage `AuthenticationError`). Distinguished from 503 so operators don't mistake a config bug for a transient upstream issue.
 - **503** — upstream transient failure (generic `VoyageError`; Anthropic upstream errors in Step 6 will follow the same hierarchy).
 
-The Voyage error-class → status-code mapping lives in `app/embeddings.py` as the `map_voyage_errors()` context manager — both `embed_with_error_mapping` (chunks, in `app/ingest.py`) and `embed_query_with_error_mapping` (queries, called by `/search` and the upcoming `/chat`) wrap it. No retries, no circuit breakers, no custom exception hierarchy.
+**Vendor error mapping locations.** Voyage SDK errors → `map_voyage_errors()` in `app/embeddings.py`; used by `embed_with_error_mapping` (chunks, in `app/ingest.py`) and `embed_query_with_error_mapping` (queries, in `/search` and `/chat`'s retrieval call). Anthropic SDK errors → `map_anthropic_errors()` in `app/llm.py`; used by `generate_answer` for `/chat`. Both context managers map to the same status-code hierarchy so operators see one taxonomy regardless of which upstream failed:
+- `AuthenticationError` / `PermissionDeniedError` → 500 (server misconfig — operators don't mistake a missing/wrong API key for a transient blip and wait it out).
+- `BadRequestError` / `InvalidRequestError` → 400 (upstream rejected our payload).
+- `RateLimitError` → 429.
+- Catch-all `APIError` (Anthropic) / `VoyageError` (Voyage) → 503 (timeout, ServiceUnavailable, generic upstream).
+
+No retries, no circuit breakers, no custom exception hierarchy.
 
 ---
 
@@ -458,7 +533,7 @@ PRs are sized to be individually reviewable. Each merges to `main` with a merge 
 3. **Step 3** — `POST /text` end-to-end: chunker module, Voyage embedder module, persistence.
 4. **Step 4** — `POST /document`: pymupdf extraction + content-hash dedupe.
 5. **Step 5** — `GET /search`: vector similarity with metadata filters via JOIN. **Done.** k=10/max=50, no score threshold, AND-across-keys metadata filters, HNSW iterative scan with `strict_order` (§6.1), shared `RetrievedChunk` model with `/chat`. See PR for the full set of locked design choices.
-6. **Step 6** — `POST /chat`: retrieval + Sonnet 4.6 + numbered citations + four guardrails.
+6. **Step 6** — `POST /chat`: retrieval + Sonnet 4.6 + structured citations + four guardrails. **Done.** Path B chosen during planning research after surfacing Anthropic's first-class Search Result content blocks (§8 rewrite). Response carries `answer` (display), `answer_blocks` (native Anthropic shape), and `sources` (all retrieved chunks with `cited` flag and verbatim `cited_text`). See PR for the full set of locked design choices.
 7. **Step 7** — Hybrid search: tsvector column + RRF query.
 8. **Step 8** — API key auth dependency.
 9. **Step 9** — Smoke tests (pytest).
