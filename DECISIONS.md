@@ -46,7 +46,7 @@ This is a working artifact — written for the reviewer and for ourselves.
 - 32K-token per-input context length is far above our 600-token chunks — no risk of truncation.
 
 **API usage notes (load-bearing for the embedder module):**
-- **Always pass `input_type`.** Voyage prepends a different internal prompt depending on whether the text is being embedded as a *document* (for indexing) or as a *query* (for retrieval). Skipping `input_type` works but produces weaker retrieval. The embedder module's signature is `embed_chunks(chunks, input_type="document") -> list[list[float]]`; ingestion calls it with the default, search/chat (PR 5/6) call it with `input_type="query"`. Embeddings produced with vs without `input_type` are still mutually compatible — this is purely a quality lever.
+- **Always pass `input_type`.** Voyage prepends a different internal prompt depending on whether the text is being embedded as a *document* (for indexing) or as a *query* (for retrieval). Skipping `input_type` works but produces weaker retrieval. The embedder module's signature is `embed_chunks(chunks, input_type="document") -> list[list[float]]`; ingestion calls it with the default, search/chat (Step 5/6) call it with `input_type="query"`. Embeddings produced with vs without `input_type` are still mutually compatible — this is purely a quality lever.
 - **Per-request caps for voyage-4:** ≤1,000 inputs AND ≤320,000 tokens per `/v1/embeddings` call. The embedder module owns sub-batching and enforces both ceilings simultaneously. With 600-token chunks, the token cap binds first at ~533 chunks per call; almost no real document hits either limit in one batch.
 - **`output_dtype="float"`** (the default) — full-precision 32-bit embeddings. Quantized variants (int8 / binary) save storage but lose recall; not worth the complexity at this scale.
 
@@ -152,7 +152,7 @@ CREATE INDEX idx_chunks_embedding
     WITH (m = 16, ef_construction = 64);
 ```
 
-The `tsv` column and its GIN index land later, in the hybrid-search step (build sequence §16, item 7). They're scaffolding for the optional lexical lane and don't belong in the must-have schema.
+The `tsv` column and its GIN index land later, in the hybrid-search step (§16, Step 7). They're scaffolding for the optional lexical lane and don't belong in the must-have schema.
 
 **Filter API on `/search`:**
 - Typed query params: `author`, `published_after`, `published_before`
@@ -223,7 +223,7 @@ PyMuPDF is dual-licensed: AGPL by default, with a commercial license available f
 
 In the SQL sketch below, `$1` is the query embedding, produced by the same embedder module used during ingestion but called with `input_type="query"` per §2's API usage notes; `$2` is the raw query string.
 
-**Implementation sketch** *(the `tsv` column referenced below lands later, in the hybrid-search step (build sequence §16, item 7); the must-have schema omits it)*:
+**Implementation sketch** *(the `tsv` column referenced below lands later, in the hybrid-search step (§16, Step 7); the must-have schema omits it)*:
 
 ```sql
 WITH vec AS (
@@ -360,7 +360,16 @@ The `tsvector` column needs a Postgres text-search config that governs tokenizat
 - It's what FastAPI does by default — wrapping is extra code that adds noise to curl examples.
 - The brief explicitly says they're not evaluating perfect error handling, and adding a custom error framework would be the unnecessary abstraction the brief warns against.
 
-**Status codes used explicitly:** 422 (Pydantic validation, free), 400 (bad file/input), 401 (missing/bad API key), 503 (Voyage/Anthropic upstream failure). No retries, no circuit breakers, no custom exception hierarchy.
+**Status codes used explicitly:**
+
+- **422** — Pydantic validation (free).
+- **400** — bad file/input (e.g., empty text, malformed PDF) AND upstream rejection of the input (Voyage `InvalidRequestError`).
+- **401** — missing/bad API key (Step 8 — not yet wired).
+- **429** — upstream rate limited (Voyage `RateLimitError`).
+- **500** — server misconfig (e.g., missing/invalid `VOYAGE_API_KEY` surfacing as Voyage `AuthenticationError`). Distinguished from 503 so operators don't mistake a config bug for a transient upstream issue.
+- **503** — upstream transient failure (generic `VoyageError`; Anthropic upstream errors in Step 6 will follow the same hierarchy).
+
+The Voyage error-class → status-code mapping lives in `app/routes/text.py`. No retries, no circuit breakers, no custom exception hierarchy.
 
 ---
 
@@ -427,15 +436,17 @@ Each of these will become a GitHub Issue and an entry in the README's "next step
 
 PRs are sized to be individually reviewable. Each merges to `main` with a merge commit (not squash) so individual commits survive.
 
-1. **PR 1** — Scaffold: `.gitignore`, `pyproject.toml` (uv, Python 3.14), `docker-compose.yml`, `app/main.py` with `/health`, `.env.example`, README skeleton.
-2. **PR 2** — Schema: `sql/schema.sql` with `documents` and `chunks` tables, pgvector extension, HNSW vector index, and GIN index on JSONB metadata. Auto-applied on first container init via `/docker-entrypoint-initdb.d/`. Lexical-ranking column (`tsv` + GIN) deferred to PR 7.
-3. **PR 3** — `POST /text` end-to-end: chunker module, Voyage embedder module, persistence.
-4. **PR 4** — `POST /document`: pymupdf extraction + content-hash dedupe.
-5. **PR 5** — `GET /search`: vector similarity with metadata filters via JOIN.
-6. **PR 6** — `POST /chat`: retrieval + Sonnet 4.6 + numbered citations + four guardrails.
-7. **PR 7** — Hybrid search: tsvector column + RRF query.
-8. **PR 8** — API key auth dependency.
-9. **PR 9** — Smoke tests (pytest).
-10. **PR 10** — README polish, sample documents demonstrating metadata filtering, curl/Postman collection, opening "deliberate cuts" issues.
+> **Numbering.** The steps below are **build-sequence ordinals**, not GitHub PR numbers. Quality follow-ups (e.g., chunker fallbacks, dependency-injection refactors) get their own GitHub PRs interleaved with feature PRs, so GitHub `#N` and "Step N" in this list are not the same N. Use `gh pr list --state merged` to see the actual PR-by-PR landing order.
 
-If time gets tight, drop PR 7 and PR 8 — they become Issues with explanations, which is also signal.
+1. **Step 1** — Scaffold: `.gitignore`, `pyproject.toml` (uv, Python 3.14), `docker-compose.yml`, `app/main.py` with `/health`, `.env.example`, README skeleton.
+2. **Step 2** — Schema: `sql/schema.sql` with `documents` and `chunks` tables, pgvector extension, HNSW vector index, and GIN index on JSONB metadata. Auto-applied on first container init via `/docker-entrypoint-initdb.d/`. Lexical-ranking column (`tsv` + GIN) deferred to Step 7.
+3. **Step 3** — `POST /text` end-to-end: chunker module, Voyage embedder module, persistence.
+4. **Step 4** — `POST /document`: pymupdf extraction + content-hash dedupe.
+5. **Step 5** — `GET /search`: vector similarity with metadata filters via JOIN.
+6. **Step 6** — `POST /chat`: retrieval + Sonnet 4.6 + numbered citations + four guardrails.
+7. **Step 7** — Hybrid search: tsvector column + RRF query.
+8. **Step 8** — API key auth dependency.
+9. **Step 9** — Smoke tests (pytest).
+10. **Step 10** — README polish, sample documents demonstrating metadata filtering, curl/Postman collection, opening "deliberate cuts" issues.
+
+If time gets tight, drop Step 7 and Step 8 — they become Issues with explanations, which is also signal.

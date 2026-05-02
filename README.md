@@ -74,9 +74,9 @@ docker compose down -v && docker compose up -d
 |--------|-------------|------------|
 | GET    | `/health`   | live       |
 | POST   | `/text`     | live       |
-| POST   | `/document` | PR 4       |
-| GET    | `/search`   | PR 5       |
-| POST   | `/chat`     | PR 6       |
+| POST   | `/document` | Step 4     |
+| GET    | `/search`   | Step 5     |
+| POST   | `/chat`     | Step 6     |
 
 > Curl examples and a Postman collection land alongside the endpoints.
 
