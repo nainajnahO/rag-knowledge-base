@@ -151,7 +151,7 @@ These skills are themselves the most concrete signal of how I work with Claude: 
 ## Known limitations
 
 Honest list of what's true *right now*. See [`DECISIONS.md §15`](./DECISIONS.md#15-deliberate-cuts-and-why) for the full table of deliberate cuts with effort estimates for each.
-- 
+
 - **DB connection is held during the Voyage upstream call.** Each request borrows a pooled connection via `Depends(get_conn)` for its full lifetime, including the (potentially-slow) Voyage embedding call. Pool size is 1–10. Under any meaningful concurrency this would exhaust the pool; not addressed at take-home scale but flagged in [PR #7](https://github.com/nainajnahO/rag-knowledge-base/pull/7)'s body. The fix (release-before-upstream + reacquire-after) is a focused half-day.
 - **HNSW is approximate.** Recall is typically >95%, not 100%. A query depending on a single rare chunk could miss it. Mitigation if ever needed: `SET LOCAL hnsw.ef_search = 100` per query — trades ~1ms latency for higher recall. ([§6](./DECISIONS.md#6-vector-index))
 - **Lexical lane is `'simple'` config (when Step 7 lands).** Language-neutral — keeps non-English content from being mis-stemmed by an English-specific config, but skips per-language morphology lift. Tracked in [issue #3](https://github.com/nainajnahO/rag-knowledge-base/issues/3); rationale in [§7](./DECISIONS.md#7-hybrid-search-fusion) (sub-section 7.1).
