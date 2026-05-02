@@ -41,7 +41,12 @@ class ChatRequest(BaseModel):
 def chat(req: ChatRequest, conn: ConnDep) -> ChatResponse:
     chunks = retrieve(conn, req.question, k=CHAT_TOP_K, filters=Filters())
 
-    if not chunks or chunks[0].score < CHAT_SCORE_THRESHOLD:
+    # Compute top_score rather than reading chunks[0].score so the gate
+    # doesn't silently depend on retrieve()'s ordering. Step 7 (hybrid/RRF)
+    # is the planned rewrite of retrieve()'s SQL body and may not preserve
+    # raw-score ordering; max() makes the gate immune to that.
+    top_score = max((c.score for c in chunks), default=0.0)
+    if top_score < CHAT_SCORE_THRESHOLD:
         return _refusal_response()
 
     message = generate_answer(req.question, chunks)
