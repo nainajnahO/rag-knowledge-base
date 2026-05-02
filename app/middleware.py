@@ -5,7 +5,7 @@ the 3M-char text cap, /chat request bodies are tiny — the global cap costs
 nothing on those routes and avoids per-path branching here.
 """
 
-from collections.abc import Awaitable, Callable
+import json
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -35,12 +35,25 @@ class MaxBodySizeMiddleware:
             return
 
         if content_length is None:
-            # Header missing or unparseable — wrap receive to count bytes as
-            # they arrive and abort once the cap is exceeded.
-            await self.app(scope, _make_counting_receive(receive, send, self.max_bytes), send)
+            # Header missing or unparseable — wrap both `receive` and `send`
+            # so we can abort the request once cumulative bytes exceed the
+            # cap and silently drop any response the downstream app tries to
+            # emit afterward (uvicorn would otherwise raise on the duplicate
+            # http.response.start).
+            state = _AbortState()
+            wrapped_receive = _make_counting_receive(receive, send, self.max_bytes, state)
+            wrapped_send = _make_guarded_send(send, state)
+            await self.app(scope, wrapped_receive, wrapped_send)
             return
 
         await self.app(scope, receive, send)
+
+
+class _AbortState:
+    """Shared mutable flag between the wrapped receive and wrapped send."""
+
+    def __init__(self) -> None:
+        self.aborted = False
 
 
 def _parse_content_length(scope: Scope) -> int | None:
@@ -53,33 +66,47 @@ def _parse_content_length(scope: Scope) -> int | None:
     return None
 
 
-def _make_counting_receive(receive: Receive, send: Send, max_bytes: int) -> Receive:
+def _make_counting_receive(
+    receive: Receive, send: Send, max_bytes: int, state: _AbortState
+) -> Receive:
     total = 0
-    aborted = False
 
     async def counting_receive() -> Message:
-        nonlocal total, aborted
+        nonlocal total
+        if state.aborted:
+            # Once aborted, signal disconnect so the app stops processing
+            # rather than reading further chunks that violate ASGI ordering
+            # after the synthetic more_body=False below.
+            return {"type": "http.disconnect"}
         message = await receive()
-        if aborted or message["type"] != "http.request":
+        if message["type"] != "http.request":
             return message
         total += len(message.get("body", b""))
         if total > max_bytes:
-            aborted = True
+            state.aborted = True
             await _send_413(send, total, max_bytes)
-            # Drain remaining body so the client doesn't hang waiting for us
-            # to ack. Returning a `more_body=False` empty chunk ends the
-            # request stream cleanly from the app's perspective.
+            # End the request stream cleanly from the app's perspective. The
+            # guarded send drops whatever response the app tries to emit.
             return {"type": "http.request", "body": b"", "more_body": False}
         return message
 
     return counting_receive
 
 
+def _make_guarded_send(send: Send, state: _AbortState) -> Send:
+    async def guarded_send(message: Message) -> None:
+        if state.aborted:
+            return
+        await send(message)
+
+    return guarded_send
+
+
 async def _send_413(send: Send, got_bytes: int, max_bytes: int) -> None:
     got_mb = got_bytes / 1024 / 1024
     max_mb = max_bytes // 1024 // 1024
     detail = f"upload exceeds the {max_mb} MB limit (got {got_mb:.1f} MB)"
-    body = f'{{"detail":"{detail}"}}'.encode()
+    body = json.dumps({"detail": detail}).encode()
     await send({
         "type": "http.response.start",
         "status": 413,
