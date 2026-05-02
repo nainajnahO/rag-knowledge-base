@@ -29,7 +29,7 @@ uv run uvicorn app.main:app --reload
 curl http://localhost:8000/health
 # → {"status":"ok"}
 
-# 6. Ingest a document
+# 6a. Ingest plain text
 curl -X POST http://localhost:8000/text \
   -H "Content-Type: application/json" \
   -d '{
@@ -40,11 +40,22 @@ curl -X POST http://localhost:8000/text \
     "metadata": {"type": "memo", "department": "finance"}
   }'
 # → {"document_id": "...", "n_chunks": 1}
+
+# 6b. Ingest a PDF (multipart/form-data — title required, rest optional;
+#     the `metadata` slot is a JSON-encoded string per DECISIONS.md §17 / Step 4 Q1)
+curl -X POST http://localhost:8000/document \
+  -F "title=Ahody hiring brief" \
+  -F "author=Ahody" \
+  -F 'metadata={"type": "take-home"}' \
+  -F "file=@Ahody hiring - work sample.pdf"
+# → {"document_id": "...", "n_chunks": 2}
 ```
 
 Requires Docker, `uv`, and Python 3.14 (uv will manage Python automatically if you don't have it).
 
-> **Dedupe behavior (`POST /text`).** If the request's `text` matches an already-ingested document (by SHA-256 content hash, applied after stripping leading/trailing whitespace), the existing `document_id` is returned and **any new `title`, `author`, `published_date`, or `metadata` in the request is ignored** — the stored row keeps its original values. This is intentional idempotent behavior (`DECISIONS.md` §12). If you need to update metadata on an existing document, that's out of scope for this endpoint.
+> **Dedupe behavior (both endpoints).** Both `/text` and `/document` dedupe on the SHA-256 of the stored text (after stripping whitespace), so re-POSTing the same body to the same endpoint returns the existing `document_id` and creates no new rows. **Any new `title`, `author`, `published_date`, or `metadata` in the second request is ignored** — the stored row keeps its original values. This is intentional idempotent behavior (`DECISIONS.md` §12). If you need to update metadata on an existing document, that's out of scope for these endpoints.
+
+> **Upload limits (`POST /document`).** Multipart body cap of 25 MB at the door (returns `413` early, before any extraction work) and a 3,000,000-character cap on the extracted text (returns `422`, same as `/text`'s text cap). The 25 MB body cap also applies to every other endpoint as a safety net but only meaningfully fires here. Full rationale + sizing math in [`DECISIONS.md §17`](./DECISIONS.md#17-upload-size-limits).
 
 ---
 
@@ -87,7 +98,7 @@ docker compose down -v && docker compose up -d
 |--------|-------------|------------|
 | GET    | `/health`   | live       |
 | POST   | `/text`     | live       |
-| POST   | `/document` | Step 4     |
+| POST   | `/document` | live       |
 | GET    | `/search`   | Step 5     |
 | POST   | `/chat`     | Step 6     |
 
@@ -155,6 +166,6 @@ Honest list of what's true *right now*. See [`DECISIONS.md §15`](./DECISIONS.md
 - **DB connection is held during the Voyage upstream call.** Each request borrows a pooled connection via `Depends(get_conn)` for its full lifetime, including the (potentially-slow) Voyage embedding call. Pool size is 1–10. Under any meaningful concurrency this would exhaust the pool; not addressed at take-home scale but flagged in [PR #7](https://github.com/nainajnahO/rag-knowledge-base/pull/7)'s body. The fix (release-before-upstream + reacquire-after) is a focused half-day.
 - **HNSW is approximate.** Recall is typically >95%, not 100%. A query depending on a single rare chunk could miss it. Mitigation if ever needed: `SET LOCAL hnsw.ef_search = 100` per query — trades ~1ms latency for higher recall. ([§6](./DECISIONS.md#6-vector-index))
 - **Lexical lane is `'simple'` config (when Step 7 lands).** Language-neutral — keeps non-English content from being mis-stemmed by an English-specific config, but skips per-language morphology lift. Tracked in [issue #3](https://github.com/nainajnahO/rag-knowledge-base/issues/3); rationale in [§7](./DECISIONS.md#7-hybrid-search-fusion) (sub-section 7.1).
-- **PyMuPDF is AGPL.** PDF extraction (when Step 4 lands) uses `pymupdf` for plain-text quality. Strict reading of AGPL would require source disclosure for a commercial network-deployed RAG service. Migration path to `pypdf` is one module, ~30 lines, same-day swap. ([§5](./DECISIONS.md#5-pdf-extraction))
+- **PyMuPDF is AGPL.** PDF extraction (`POST /document`) uses `pymupdf` for plain-text quality. Strict reading of AGPL would require source disclosure for a commercial network-deployed RAG service. Migration path to `pypdf` is one module, ~30 lines, same-day swap. ([§5](./DECISIONS.md#5-pdf-extraction))
 - **Single-turn `/chat`.** Multi-turn requires query rewriting (the latest user turn alone has no semantic content to retrieve on; the full conversation pollutes embeddings). Doing this badly is worse than not doing it. The brief explicitly asks for single-turn. ([§10](./DECISIONS.md#10-chat-shape--single-turn))
 - **Dedupe is silent.** If you `POST /text` with content that matches an existing document by SHA-256 (after stripping whitespace), the existing `document_id` is returned and any new `title` / `author` / `published_date` / `metadata` in the request is ignored. There is no separate "update metadata" endpoint. ([§12](./DECISIONS.md#12-upload-dedupe))

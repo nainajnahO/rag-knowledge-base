@@ -1,23 +1,63 @@
 import json
 from hashlib import sha256
+from typing import Annotated
 
 import psycopg
+import pymupdf
 import voyageai
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Form, HTTPException
 
 from app.chunking import chunk_text
 from app.db import ConnDep
 from app.embeddings import embed_chunks
-from app.models import IngestTextRequest, IngestResponse
+from app.extraction import TextTooLargeError, extract_text
+from app.models import IngestDocumentRequest, IngestResponse
 
 router = APIRouter()
 
 
-@router.post("/text", response_model=IngestResponse)
-def ingest_text(req: IngestTextRequest, conn: ConnDep) -> IngestResponse:
-    text = req.text.strip()
+@router.post("/document", response_model=IngestResponse)
+def ingest_document(
+    body: Annotated[IngestDocumentRequest, Form()],
+    conn: ConnDep,
+) -> IngestResponse:
+    pdf_bytes = body.file.file.read()
+
+    # Magic-byte check (DECISIONS.md §17). The Content-Type header is
+    # client-controlled and untrustworthy; the %PDF- prefix is a property
+    # of the file itself.
+    if not pdf_bytes.startswith(b"%PDF-"):
+        raise HTTPException(status_code=400, detail="file is not a PDF (missing %PDF- header)")
+
+    try:
+        text = extract_text(pdf_bytes)
+    except pymupdf.FileDataError as exc:
+        raise HTTPException(status_code=400, detail=f"malformed PDF: {exc}") from exc
+    except TextTooLargeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # PyMuPDF can emit \x00 for unmapped glyphs and certain malformed text
+    # streams. Postgres TEXT/JSONB reject NULs, which would otherwise surface
+    # here as an opaque 500 from psycopg.
+    text = text.replace("\x00", "").strip()
     if not text:
-        raise HTTPException(status_code=400, detail="text is empty after stripping whitespace")
+        # Image-only / scanned PDFs without an OCR'd text layer hit this.
+        # Per §17 this is a 400 (mirrors /text's empty-after-strip), not 422.
+        raise HTTPException(
+            status_code=400,
+            detail="PDF contains no extractable text (possibly an image-only or scanned document; OCR is not supported)",
+        )
+
+    # Parse the metadata JSON string (Q1: multipart sends metadata as JSON).
+    try:
+        metadata = json.loads(body.metadata)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"metadata field is not valid JSON: {exc}",
+        ) from exc
+    if not isinstance(metadata, dict):
+        raise HTTPException(status_code=400, detail="metadata must be a JSON object")
 
     content_hash = sha256(text.encode("utf-8")).hexdigest()
 
@@ -41,15 +81,12 @@ def ingest_text(req: IngestTextRequest, conn: ConnDep) -> IngestResponse:
     try:
         embeddings = embed_chunks(chunks)
     except voyageai.error.AuthenticationError as exc:
-        # Server misconfig (missing/invalid VOYAGE_API_KEY) — surface as 500 so
-        # operators don't mistake it for a transient upstream issue.
         raise HTTPException(status_code=500, detail=f"embedding auth failure: {exc}") from exc
     except voyageai.error.RateLimitError as exc:
         raise HTTPException(status_code=429, detail=f"embedding rate limited: {exc}") from exc
     except voyageai.error.InvalidRequestError as exc:
         raise HTTPException(status_code=400, detail=f"embedding rejected input: {exc}") from exc
     except voyageai.error.VoyageError as exc:
-        # Timeout / ServiceUnavailable / generic upstream — transient, 503.
         raise HTTPException(status_code=503, detail=f"embedding upstream failure: {exc}") from exc
 
     try:
@@ -62,10 +99,10 @@ def ingest_text(req: IngestTextRequest, conn: ConnDep) -> IngestResponse:
                     RETURNING id
                     """,
                     (
-                        req.title,
-                        req.author,
-                        req.published_date,
-                        json.dumps(req.metadata),
+                        body.title,
+                        body.author,
+                        body.published_date,
+                        json.dumps(metadata),
                         text,
                         content_hash,
                     ),
@@ -79,10 +116,10 @@ def ingest_text(req: IngestTextRequest, conn: ConnDep) -> IngestResponse:
                     ],
                 )
     except psycopg.errors.UniqueViolation:
-        # Race: another concurrent request inserted the same content_hash between
-        # our pre-check and this transaction. The transaction context manager has
-        # already rolled back; re-query for the existing document_id and return it
-        # (idempotent — DECISIONS.md §12).
+        # Race: another concurrent request inserted the same content_hash
+        # between our pre-check and this transaction. The transaction context
+        # manager has already rolled back; re-query for the existing
+        # document_id (idempotent — DECISIONS.md §12).
         with conn.cursor() as cur:
             cur.execute(
                 """
