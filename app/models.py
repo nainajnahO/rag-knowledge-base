@@ -116,8 +116,14 @@ class ChatResponse(BaseModel):
     simple display) and the native Anthropic block list (`answer_blocks`)
     so clients can render claim-with-quote inline. `sources` is all
     retrieved chunks (cited or not), per DECISIONS.md §8.
+
+    `stop_reason` is passed through from Anthropic so clients can detect
+    `max_tokens` truncation or `refusal` rather than treating an
+    incomplete answer as a complete one. None on the threshold-gate
+    refusal path (no Anthropic call was made).
     """
 
     answer: str
     answer_blocks: list[AnswerBlock]
     sources: list[ChatSource]
+    stop_reason: str | None

@@ -83,7 +83,8 @@ curl -X POST http://localhost:8000/chat \
 #        "cited_text": ["Revenue grew 12% in Q3 2025 to $4.2M, driven by enterprise contracts."],
 #        "text": "...", "document_title": "Q3 Revenue Memo", ...},
 #       {"chunk_id": "...", "score": 0.31, "cited": false, "cited_text": [], ...}
-#     ]
+#     ],
+#     "stop_reason": "end_turn"
 #   }
 ```
 

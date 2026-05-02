@@ -53,6 +53,7 @@ def _refusal_response() -> ChatResponse:
         answer=REFUSAL_TEXT,
         answer_blocks=[AnswerBlock(text=REFUSAL_TEXT, citations=[])],
         sources=[],
+        stop_reason=None,
     )
 
 
@@ -101,4 +102,9 @@ def _build_response(
         )
         for chunk in retrieved
     ]
-    return ChatResponse(answer=answer, answer_blocks=answer_blocks, sources=sources)
+    return ChatResponse(
+        answer=answer,
+        answer_blocks=answer_blocks,
+        sources=sources,
+        stop_reason=message.stop_reason,
+    )

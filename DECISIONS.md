@@ -363,11 +363,12 @@ One block per chunk for this PR. Splitting chunks into sentence-level blocks wou
       "cited": true,
       "cited_text": ["Revenue grew 12% in Q3 2025 to $4.2M, driven by enterprise contracts."]
     }
-  ]
+  ],
+  "stop_reason": "end_turn"
 }
 ```
 
-`answer` is the concatenation of all `answer_blocks[i].text` for clients that just want a string. `answer_blocks` is Anthropic's native shape (preserving the per-block citation linkage). `sources` is all 8 retrieved chunks (not just cited ones, per the original §8 intent — let the reviewer see what the model had access to). `cited: bool` distinguishes which chunks the model actually grounded claims on; `cited_text: list[str]` carries the verbatim quotes (multiple if the model cited the same chunk in multiple `answer_blocks`).
+`answer` is the concatenation of all `answer_blocks[i].text` for clients that just want a string. `answer_blocks` is Anthropic's native shape (preserving the per-block citation linkage). `sources` is all 8 retrieved chunks (not just cited ones, per the original §8 intent — let the reviewer see what the model had access to). `cited: bool` distinguishes which chunks the model actually grounded claims on; `cited_text: list[str]` carries the verbatim quotes (multiple if the model cited the same chunk in multiple `answer_blocks`). `stop_reason` is passed through from Anthropic — `"end_turn"` is the healthy case; clients should treat `"max_tokens"` as a truncation signal and `"refusal"` as a model-level decline.
 
 **Refusal response shape** (top score < 0.5 OR 0 chunks retrieved):
 
@@ -380,11 +381,12 @@ One block per chunk for this PR. Splitting chunks into sentence-level blocks wou
       "citations": []
     }
   ],
-  "sources": []
+  "sources": [],
+  "stop_reason": null
 }
 ```
 
-`sources: []` because we never called Anthropic — the LLM didn't "have access to" anything. If the reviewer wants to see what retrieval found, they can hit `/search?q=<question>` directly.
+`sources: []` because we never called Anthropic — the LLM didn't "have access to" anything. `stop_reason: null` for the same reason — there was no model call to report a stop_reason for. If the reviewer wants to see what retrieval found, they can hit `/search?q=<question>` directly.
 
 **Migration notes — one block per chunk → sentence-splitting (~hour, local):**
 - In `app/llm.py.build_search_result_block`, split `chunk.text` into sentences (`pysbd` or simple `re.split`), emit one `{"type": "text", "text": s}` per sentence in the `content` array.
