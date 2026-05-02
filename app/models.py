@@ -29,8 +29,9 @@ class IngestDocumentRequest(BaseModel):
     DECISIONS.md, Q1 of Step 4 planning). `metadata` is a JSON-encoded
     string because multipart form fields can't carry nested objects;
     the route parses it via json.loads after Pydantic validation.
-    The 3M-char text cap applies to the *extracted* text — re-validated
-    in the route via TypeAdapter(MaxText), not declared on this model.
+    The 3M-char text cap applies to the *extracted* text and is enforced
+    page-by-page in `app.extraction.extract_text` (raises `TextTooLargeError`,
+    mapped to 422 by the route), not declared on this model.
 
     `file` is included so FastAPI's Annotated[Model, Form()] handler
     expands form fields and the file slot in one go. Declaring `file`

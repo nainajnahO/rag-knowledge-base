@@ -6,18 +6,14 @@ import psycopg
 import pymupdf
 import voyageai
 from fastapi import APIRouter, Form, HTTPException
-from pydantic import TypeAdapter, ValidationError
 
 from app.chunking import chunk_text
 from app.db import ConnDep
 from app.embeddings import embed_chunks
-from app.extraction import extract_text
-from app.limits import MaxText
+from app.extraction import TextTooLargeError, extract_text
 from app.models import IngestDocumentRequest, IngestResponse
 
 router = APIRouter()
-
-_max_text_adapter: TypeAdapter[str] = TypeAdapter(MaxText)
 
 
 @router.post("/document", response_model=IngestResponse)
@@ -37,6 +33,8 @@ def ingest_document(
         text = extract_text(pdf_bytes)
     except pymupdf.FileDataError as exc:
         raise HTTPException(status_code=400, detail=f"malformed PDF: {exc}") from exc
+    except TextTooLargeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # PyMuPDF can emit \x00 for unmapped glyphs and certain malformed text
     # streams. Postgres TEXT/JSONB reject NULs, which would otherwise surface
@@ -49,14 +47,6 @@ def ingest_document(
             status_code=400,
             detail="PDF contains no extractable text (possibly an image-only or scanned document; OCR is not supported)",
         )
-
-    # Re-validate against the 3M-char cap (DECISIONS.md §17). Reuses the
-    # same MaxText alias /text uses, via TypeAdapter so we don't have to
-    # construct an IngestTextRequest just to validate one field.
-    try:
-        _max_text_adapter.validate_python(text)
-    except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
     # Parse the metadata JSON string (Q1: multipart sends metadata as JSON).
     try:
