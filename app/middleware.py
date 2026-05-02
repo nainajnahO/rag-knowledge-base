@@ -7,6 +7,7 @@ nothing on those routes and avoids per-path branching here.
 
 import json
 
+from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.limits import MAX_UPLOAD_BYTES
@@ -57,13 +58,13 @@ class _AbortState:
 
 
 def _parse_content_length(scope: Scope) -> int | None:
-    for name, value in scope.get("headers", []):
-        if name == b"content-length":
-            try:
-                return int(value)
-            except ValueError:
-                return None
-    return None
+    raw = Headers(scope=scope).get("content-length")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 def _make_counting_receive(
