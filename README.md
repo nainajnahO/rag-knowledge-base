@@ -108,13 +108,6 @@ The whole project started with an extended planning Q&A session — no code, jus
 3. **Compare them on the dimensions that actually matter for *this* project** — not generic best-practice scoring. E.g., for the embedding model: dimensions, per-request token cap, per-input context length, multilingual quality, vendor lock-in, story-cohesion (Voyage as Anthropic's recommended embedding partner), and Matryoshka headroom for future storage-vs-recall tuning.
 4. **Lock in a choice and write down the migration path** — what would it cost (in code, schema, and re-ingestion) to switch later? This is the most consistently useful artifact: every locked-in choice in `DECISIONS.md` has a "Migration notes" subsection so the next person doesn't have to re-derive the analysis.
 
-The Q&A surfaced things I wouldn't have considered alone. Two examples:
-
-- **`voyage-context-3` vs `voyage-4`.** I'd have reached for "biggest model" (`voyage-4-large`) by default. Claude pushed back: `voyage-4-large` has a tighter per-request token cap (120K vs 320K) which would force the embedder's sub-batching to re-tune, and "biggest model needs corpus-specific benchmarks to defend, which a take-home doesn't have." We landed on `voyage-4` (the labelled general-purpose default) and documented the contextual-embeddings upgrade path explicitly. ([§2](./DECISIONS.md#2-embedding-model))
-- **Chunk-size negotiation.** First instinct was 512 tokens / 50-token overlap (familiar from elsewhere). Working through the math against memo/report-shaped prose — typical paragraph ~150 tokens, typical multi-paragraph unit ~700 — pushed us to 600 tokens with 15% overlap. The reasoning is in `DECISIONS.md §3` and would not have been written down had we not been pushing each other on "why exactly these numbers?"
-
-The same pattern produced `DECISIONS.md §15` (deliberate cuts) and `§16` (build sequence) — explicit artifacts of *what we chose not to build* and *the order in which we'd ship the cuts that mattered*.
-
 ### Where I disagreed and Claude was wrong
 
 - **LangChain framing.** Claude initially justified the custom chunker by claiming *"LangChain's `RecursiveCharacterTextSplitter` can't do token-based splitting."* I pushed back — this was wrong. LangChain's splitter accepts a `length_function` and *can* be configured token-based. The honest tradeoff is dependency footprint vs. ~60 lines of custom code, not capability. Claude rewrote `DECISIONS.md §3` to reflect the real reasoning instead of a false constraint. ([commit `8d0791d`](https://github.com/nainajnahO/rag-knowledge-base/commit/8d0791d) / [§3](./DECISIONS.md#3-chunking-strategy))
@@ -147,13 +140,6 @@ The following review skills are **slash-commands I (the user) wrote myself** and
 
 These skills are themselves the most concrete signal of how I work with Claude: I don't trust a single pass of its review; I run independent checks I authored, and I act on what they find.
 
-### What Claude did well, unaided
-
-- Picked up FastAPI lifespan handlers, `Annotated[]` dependency style, and Pydantic v2 conventions on the first try without reaching for stale patterns.
-- Authored `DECISIONS.md` collaboratively to a level of detail (alternatives considered, migration notes, effort estimates) I wouldn't have produced solo in the same time.
-- Followed the rule "trust but verify" — verified `register_vector` adapter behavior, `voyageai.error` class hierarchy, and `psycopg.Connection.transaction()` rollback semantics by reading source code rather than guessing.
-- Recovered cleanly when I disagreed. Pushback never escalated; framing was always "you're right, here's the corrected version" with the underlying reasoning made visible.
-
 ---
 
 ## What I left out and why
@@ -165,10 +151,7 @@ These skills are themselves the most concrete signal of how I work with Claude: 
 ## Known limitations
 
 Honest list of what's true *right now*. See [`DECISIONS.md §15`](./DECISIONS.md#15-deliberate-cuts-and-why) for the full table of deliberate cuts with effort estimates for each.
-
-- **Only `POST /text` is wired.** Document upload (`POST /document`), search (`GET /search`), and chat (`POST /chat`) are scaffolded in `DECISIONS.md` but not yet implemented. See the endpoint-status table above and `DECISIONS.md §16` for the build sequence.
-- **No authentication.** `settings.api_key` is a placeholder; no dependency enforces it. Step 8 — anyone who can reach the port can ingest documents.
-- **No tests.** `pytest` + `httpx` are in dev-deps but no test files exist yet. Step 9 lands three smoke tests (chunker sanity, upload→search round-trip, citation-source consistency).
+- 
 - **DB connection is held during the Voyage upstream call.** Each request borrows a pooled connection via `Depends(get_conn)` for its full lifetime, including the (potentially-slow) Voyage embedding call. Pool size is 1–10. Under any meaningful concurrency this would exhaust the pool; not addressed at take-home scale but flagged in [PR #7](https://github.com/nainajnahO/rag-knowledge-base/pull/7)'s body. The fix (release-before-upstream + reacquire-after) is a focused half-day.
 - **HNSW is approximate.** Recall is typically >95%, not 100%. A query depending on a single rare chunk could miss it. Mitigation if ever needed: `SET LOCAL hnsw.ef_search = 100` per query — trades ~1ms latency for higher recall. ([§6](./DECISIONS.md#6-vector-index))
 - **Lexical lane is `'simple'` config (when Step 7 lands).** Language-neutral — keeps non-English content from being mis-stemmed by an English-specific config, but skips per-language morphology lift. Tracked in [issue #3](https://github.com/nainajnahO/rag-knowledge-base/issues/3); rationale in [§7](./DECISIONS.md#7-hybrid-search-fusion) (sub-section 7.1).
