@@ -50,3 +50,25 @@ class IngestDocumentRequest(BaseModel):
 class IngestResponse(BaseModel):
     document_id: UUID
     n_chunks: int
+
+
+class RetrievedChunk(BaseModel):
+    """One chunk + its parent-document context, returned by retrieval.
+
+    Shared between GET /search (wrapped in SearchResponse.results) and the
+    upcoming POST /chat (extended with `citation: int` per DECISIONS.md §8).
+    """
+
+    chunk_id: UUID
+    ordinal: int
+    document_id: UUID
+    document_title: str
+    author: str | None
+    published_date: date | None
+    metadata: dict[str, Any]
+    score: float
+    text: str
+
+
+class SearchResponse(BaseModel):
+    results: list[RetrievedChunk]
