@@ -21,10 +21,13 @@ from app.models import Chunk, IngestResponse
 def embed_with_error_mapping(chunks: list[Chunk]) -> list[list[float]]:
     """Embed chunks via Voyage, translating SDK errors to HTTPException per §11.
 
-    AuthenticationError -> 500 (server misconfig — missing/invalid VOYAGE_API_KEY).
+    AuthenticationError -> 500 (server misconfig — missing/invalid VOYAGE_API_KEY;
+        surfaced as 500 rather than a 5xx-transient code so operators don't
+        mistake it for an upstream blip and wait it out).
     RateLimitError -> 429.
     InvalidRequestError -> 400 (payload Voyage refused).
-    VoyageError catch-all -> 503 (timeout / ServiceUnavailable / generic upstream).
+    VoyageError catch-all -> 503 (timeout / ServiceUnavailable / generic upstream;
+        transient, the client may retry).
     """
     try:
         return embed_chunks(chunks)
