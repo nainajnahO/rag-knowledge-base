@@ -10,35 +10,16 @@ and content shape (text vs PDF).
 from datetime import date
 
 import psycopg
-import voyageai
-from fastapi import HTTPException
 from psycopg import Connection
 
-from app.embeddings import embed_chunks
+from app.embeddings import embed_chunks, map_voyage_errors
 from app.models import Chunk, IngestResponse
 
 
 def embed_with_error_mapping(chunks: list[Chunk]) -> list[list[float]]:
-    """Embed chunks via Voyage, translating SDK errors to HTTPException per §11.
-
-    AuthenticationError -> 500 (server misconfig — missing/invalid VOYAGE_API_KEY;
-        surfaced as 500 rather than a 5xx-transient code so operators don't
-        mistake it for an upstream blip and wait it out).
-    RateLimitError -> 429.
-    InvalidRequestError -> 400 (payload Voyage refused).
-    VoyageError catch-all -> 503 (timeout / ServiceUnavailable / generic upstream;
-        transient, the client may retry).
-    """
-    try:
+    """Embed chunks via Voyage, translating SDK errors to HTTPException per §11."""
+    with map_voyage_errors():
         return embed_chunks(chunks)
-    except voyageai.error.AuthenticationError as exc:
-        raise HTTPException(status_code=500, detail=f"embedding auth failure: {exc}") from exc
-    except voyageai.error.RateLimitError as exc:
-        raise HTTPException(status_code=429, detail=f"embedding rate limited: {exc}") from exc
-    except voyageai.error.InvalidRequestError as exc:
-        raise HTTPException(status_code=400, detail=f"embedding rejected input: {exc}") from exc
-    except voyageai.error.VoyageError as exc:
-        raise HTTPException(status_code=503, detail=f"embedding upstream failure: {exc}") from exc
 
 
 def find_existing_by_hash(conn: Connection, content_hash: str) -> IngestResponse | None:

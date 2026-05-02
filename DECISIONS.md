@@ -201,6 +201,20 @@ PyMuPDF is dual-licensed: AGPL by default, with a commercial license available f
 
 **One subtle thing worth knowing:** HNSW gives approximate nearest neighbor (recall typically >95%, not 100%). If a niche query depends on a single rare chunk, that miss rate matters. Mitigation if needed: `SET LOCAL hnsw.ef_search = 100` per query — trades a bit of latency for recall.
 
+### 6.1 Iterative scan for filtered queries
+
+`/search` and `/chat` retrieve with metadata filters joined to `documents`. Naive HNSW + post-filter can underfill `LIMIT k` when filters reject most candidates: HNSW returns its initial batch (`hnsw.ef_search`, default 40), the filter rejects some, and you get back fewer than `k`. To handle this, `app/retrieval.py` sets `SET LOCAL hnsw.iterative_scan = 'strict_order'` (pgvector ≥0.8.0) inside the retrieval transaction. The index keeps walking the graph past its initial batch until enough rows pass `WHERE` to fill `k`, while preserving similarity ordering. Bounded by `hnsw.max_scan_tuples` (default 20,000) so very selective filters don't trigger a full scan.
+
+`strict_order` over `relaxed_order` because results are returned to the client in displayed score order — out-of-order results would need an outer sort to fix, gaining nothing at this scale.
+
+**Migration notes:** none. The GUC is per-transaction; bumping `max_scan_tuples` if very selective filters routinely underfill is a one-line SET inside `retrieve()`.
+
+**Validation gap (honest note):** at the smoke-test corpus size (~5 chunks), the planner picks Seq Scan + Hash Join, not HNSW — `EXPLAIN` confirmed. Iterative scan only engages when the planner has chosen an HNSW Index Scan node, which won't happen until the corpus is large enough that the HNSW path beats brute-force on cost. The mechanism is therefore production-default insurance, not validated empirically at the only scale this code has been tested at.
+
+**Why iterative scan and not over-fetch CTE (revisited).** During PR #18 review we re-examined whether to swap `SET LOCAL hnsw.iterative_scan` for an over-fetch CTE pattern (inner CTE pulls top-200 by distance, outer JOIN+filter+LIMIT k). Verified the alternative empirically with `EXPLAIN ANALYZE` on the live DB: at the small-corpus / no-HNSW-engaged case, our current shape is **strictly better** — 0.16ms vs 0.28ms execution, 38 vs 67 buffer hits, and it has no underfill failure mode (the JOIN+filter eliminates rows before the sort, where over-fetch CTE truncates to 200 candidates and only then filters). The case for over-fetch CTE was never the no-HNSW path; it was decoupling from the planner's HNSW decision when HNSW *would* be useful but the planner refuses. pgvector 0.8.0's improved cost model is supposed to fix that planner reluctance directly — going back to over-fetch CTE in 2026 is "doing things the pre-0.8.0 way." Decision: keep `SET LOCAL hnsw.iterative_scan`, accept the validation gap, trust pgvector's design over re-implementing it in SQL. Issue #19 closed with these findings.
+
+**Score range:** the SELECT computes `1 - (embedding <=> :q)` where `<=>` is cosine distance in `[0, 2]`, so `score ∈ [-1, 1]` mathematically. voyage-4 embeddings are L2-normalized, and natural-language pairs almost always score ≥ 0; negative scores indicate the query and chunk are pointing in opposite directions in vector space (rare in practice).
+
 ---
 
 ## 7. Hybrid search fusion
@@ -370,7 +384,7 @@ The `tsvector` column needs a Postgres text-search config that governs tokenizat
 - **500** — server misconfig (e.g., missing/invalid `VOYAGE_API_KEY` surfacing as Voyage `AuthenticationError`). Distinguished from 503 so operators don't mistake a config bug for a transient upstream issue.
 - **503** — upstream transient failure (generic `VoyageError`; Anthropic upstream errors in Step 6 will follow the same hierarchy).
 
-The Voyage error-class → status-code mapping lives in `app/routes/text.py`. No retries, no circuit breakers, no custom exception hierarchy.
+The Voyage error-class → status-code mapping lives in `app/embeddings.py` as the `map_voyage_errors()` context manager — both `embed_with_error_mapping` (chunks, in `app/ingest.py`) and `embed_query_with_error_mapping` (queries, called by `/search` and the upcoming `/chat`) wrap it. No retries, no circuit breakers, no custom exception hierarchy.
 
 ---
 
@@ -443,7 +457,7 @@ PRs are sized to be individually reviewable. Each merges to `main` with a merge 
 2. **Step 2** — Schema: `sql/schema.sql` with `documents` and `chunks` tables, pgvector extension, HNSW vector index, and GIN index on JSONB metadata. Auto-applied on first container init via `/docker-entrypoint-initdb.d/`. Lexical-ranking column (`tsv` + GIN) deferred to Step 7.
 3. **Step 3** — `POST /text` end-to-end: chunker module, Voyage embedder module, persistence.
 4. **Step 4** — `POST /document`: pymupdf extraction + content-hash dedupe.
-5. **Step 5** — `GET /search`: vector similarity with metadata filters via JOIN.
+5. **Step 5** — `GET /search`: vector similarity with metadata filters via JOIN. **Done.** k=10/max=50, no score threshold, AND-across-keys metadata filters, HNSW iterative scan with `strict_order` (§6.1), shared `RetrievedChunk` model with `/chat`. See PR for the full set of locked design choices.
 6. **Step 6** — `POST /chat`: retrieval + Sonnet 4.6 + numbered citations + four guardrails.
 7. **Step 7** — Hybrid search: tsvector column + RRF query.
 8. **Step 8** — API key auth dependency.
