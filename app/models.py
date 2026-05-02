@@ -2,6 +2,7 @@ from datetime import date
 from typing import Any
 from uuid import UUID
 
+from fastapi import UploadFile
 from pydantic import BaseModel, Field
 
 from app.limits import MaxText
@@ -30,12 +31,19 @@ class IngestDocumentRequest(BaseModel):
     the route parses it via json.loads after Pydantic validation.
     The 3M-char text cap applies to the *extracted* text — re-validated
     in the route via TypeAdapter(MaxText), not declared on this model.
+
+    `file` is included so FastAPI's Annotated[Model, Form()] handler
+    expands form fields and the file slot in one go. Declaring `file`
+    as a separate UploadFile parameter alongside this model causes
+    FastAPI to treat the model as a single body field instead of
+    expanding its fields.
     """
 
     title: str = Field(min_length=1)
     author: str | None = None
     published_date: date | None = None
     metadata: str = "{}"
+    file: UploadFile
 
 
 class IngestResponse(BaseModel):

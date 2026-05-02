@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from app import db
 from app.middleware import MaxBodySizeMiddleware
+from app.routes.document import router as document_router
 from app.routes.text import router as text_router
 
 
@@ -23,6 +24,7 @@ app = FastAPI(title="RAG Knowledge Base", version="0.1.0", lifespan=lifespan)
 # middleware runs.
 app.add_middleware(MaxBodySizeMiddleware)
 app.include_router(text_router)
+app.include_router(document_router)
 
 
 @app.get("/health")
