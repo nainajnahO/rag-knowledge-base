@@ -99,6 +99,22 @@ docker compose down -v && docker compose up -d
 
 This implementation was built collaboratively with Claude Code (model: Claude Opus 4.7). The honest record below documents the moments the collaboration actually mattered — where Claude was wrong and I corrected it, where I pushed back on framing, and where my own tooling caught real bugs Claude introduced. Generic "Claude wrote the code, I reviewed it" claims aren't useful signal; specific recoveries are.
 
+### How the design phase ran (before any code was written)
+
+The whole project started with an extended planning Q&A session — no code, just a long structured conversation that produced [`DECISIONS.md`](./DECISIONS.md) as its artifact. For every decision area (stack, embedding model, chunking strategy, metadata schema, PDF extraction, vector index, hybrid-search fusion, citation approach, chat LLM, chat shape, error shapes, dedupe, tests, auth, deliberate cuts, build sequence) we worked through the same loop:
+
+1. **Frame the decision.** What is actually being chosen here, and what constraints does the take-home brief impose vs. leave open?
+2. **Enumerate alternatives.** Not just two, usually three to six — including the option I'd have reflexively picked, the option I'd have dismissed, and at least one option neither of us would have surfaced first. Claude pushed for breadth here; I pushed for honest comparison rather than rubber-stamping.
+3. **Compare them on the dimensions that actually matter for *this* project** — not generic best-practice scoring. E.g., for the embedding model: dimensions, per-request token cap, per-input context length, multilingual quality, vendor lock-in, story-cohesion (Voyage as Anthropic's recommended embedding partner), and Matryoshka headroom for future storage-vs-recall tuning.
+4. **Lock in a choice and write down the migration path** — what would it cost (in code, schema, and re-ingestion) to switch later? This is the most consistently useful artifact: every locked-in choice in `DECISIONS.md` has a "Migration notes" subsection so the next person doesn't have to re-derive the analysis.
+
+The Q&A surfaced things I wouldn't have considered alone. Two examples:
+
+- **`voyage-context-3` vs `voyage-4`.** I'd have reached for "biggest model" (`voyage-4-large`) by default. Claude pushed back: `voyage-4-large` has a tighter per-request token cap (120K vs 320K) which would force the embedder's sub-batching to re-tune, and "biggest model needs corpus-specific benchmarks to defend, which a take-home doesn't have." We landed on `voyage-4` (the labelled general-purpose default) and documented the contextual-embeddings upgrade path explicitly. ([§2](./DECISIONS.md#2-embedding-model))
+- **Chunk-size negotiation.** First instinct was 512 tokens / 50-token overlap (familiar from elsewhere). Working through the math against memo/report-shaped prose — typical paragraph ~150 tokens, typical multi-paragraph unit ~700 — pushed us to 600 tokens with 15% overlap. The reasoning is in `DECISIONS.md §3` and would not have been written down had we not been pushing each other on "why exactly these numbers?"
+
+The same pattern produced `DECISIONS.md §15` (deliberate cuts) and `§16` (build sequence) — explicit artifacts of *what we chose not to build* and *the order in which we'd ship the cuts that mattered*.
+
 ### Where I disagreed and Claude was wrong
 
 - **LangChain framing.** Claude initially justified the custom chunker by claiming *"LangChain's `RecursiveCharacterTextSplitter` can't do token-based splitting."* I pushed back — this was wrong. LangChain's splitter accepts a `length_function` and *can* be configured token-based. The honest tradeoff is dependency footprint vs. ~60 lines of custom code, not capability. Claude rewrote `DECISIONS.md §3` to reflect the real reasoning instead of a false constraint. ([commit `8d0791d`](https://github.com/nainajnahO/rag-knowledge-base/commit/8d0791d) / [§3](./DECISIONS.md#3-chunking-strategy))
