@@ -49,6 +49,15 @@ curl -X POST http://localhost:8000/document \
   -F 'metadata={"type": "take-home"}' \
   -F "file=@Ahody hiring - work sample.pdf"
 # → {"document_id": "...", "n_chunks": 2}
+
+# 7. Search (top-k by cosine similarity; default k=10, max 50)
+curl 'http://localhost:8000/search?q=revenue%20growth'
+
+# 7b. Search with metadata filters (AND across keys, single-value-per-key)
+curl 'http://localhost:8000/search?q=plans&author=Eng%20Leadership&meta.department=engineering&published_after=2026-01-01'
+# → {"results": [{"chunk_id": "...", "ordinal": 0, "document_id": "...",
+#                 "document_title": "...", "author": "...", "published_date": "...",
+#                 "metadata": {...}, "score": 0.57, "text": "..."}]}
 ```
 
 Requires Docker, `uv`, and Python 3.14 (uv will manage Python automatically if you don't have it).
@@ -99,7 +108,7 @@ docker compose down -v && docker compose up -d
 | GET    | `/health`   | live       |
 | POST   | `/text`     | live       |
 | POST   | `/document` | live       |
-| GET    | `/search`   | Step 5     |
+| GET    | `/search`   | live       |
 | POST   | `/chat`     | Step 6     |
 
 > Curl examples and a Postman collection land alongside the endpoints.
