@@ -64,6 +64,7 @@ def _build_response(
     Preserves the native answer_blocks shape; flattens to `answer` for
     simple display; annotates each retrieved chunk with cited/cited_text.
     """
+    chunk_by_id = {str(c.chunk_id): c for c in retrieved}
     answer_blocks: list[AnswerBlock] = []
     citations_by_chunk: dict[str, list[str]] = {}
 
@@ -74,15 +75,21 @@ def _build_response(
         for cite in block.citations or []:
             if cite.type != "search_result_location":
                 continue
-            chunk_id = cite.source
+            # Defensive: Anthropic's contract says `source` echoes a value we
+            # passed in, but if it ever doesn't, drop the citation rather than
+            # 500 the request.
+            chunk = chunk_by_id.get(cite.source)
+            if chunk is None:
+                continue
             refs.append(
                 CitationRef(
-                    chunk_id=chunk_id,
-                    document_title=cite.title,
+                    chunk_id=chunk.chunk_id,
+                    document_title=chunk.document_title,
+                    published_date=chunk.published_date,
                     cited_text=cite.cited_text,
                 )
             )
-            citations_by_chunk.setdefault(chunk_id, []).append(cite.cited_text)
+            citations_by_chunk.setdefault(cite.source, []).append(cite.cited_text)
         answer_blocks.append(AnswerBlock(text=block.text, citations=refs))
 
     answer = "".join(b.text for b in answer_blocks)

@@ -71,7 +71,8 @@ curl -X POST http://localhost:8000/chat \
 #         "citations": [
 #           {
 #             "chunk_id": "...",
-#             "document_title": "Q3 Revenue Memo (2025-10-15)",
+#             "document_title": "Q3 Revenue Memo",
+#             "published_date": "2025-10-15",
 #             "cited_text": "Revenue grew 12% in Q3 2025 to $4.2M, driven by enterprise contracts."
 #           }
 #         ]

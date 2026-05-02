@@ -77,12 +77,15 @@ class SearchResponse(BaseModel):
 
 class CitationRef(BaseModel):
     """One citation attached to an AnswerBlock — slim view of Anthropic's
-    search_result_location. We carry chunk_id (mapped from the SDK's `source`
-    field), document_title, and the verbatim `cited_text` Anthropic returns.
+    search_result_location. `chunk_id` is mapped from the SDK's `source`
+    field; `document_title` and `published_date` are looked up from the
+    retrieved chunk (not echoed from Anthropic) so the citation view stays
+    in lockstep with `ChatSource` — same field names, same content.
     """
 
     chunk_id: UUID
     document_title: str
+    published_date: date | None
     cited_text: str
 
 

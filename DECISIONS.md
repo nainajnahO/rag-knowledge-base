@@ -342,7 +342,8 @@ One block per chunk for this PR. Splitting chunks into sentence-level blocks wou
       "citations": [
         {
           "chunk_id": "uuid",
-          "document_title": "Q3 Revenue Memo (2025-10-15)",
+          "document_title": "Q3 Revenue Memo",
+          "published_date": "2025-10-15",
           "cited_text": "Revenue grew 12% in Q3 2025 to $4.2M, driven by enterprise contracts."
         }
       ]
