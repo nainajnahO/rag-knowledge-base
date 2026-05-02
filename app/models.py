@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.limits import MaxText
+
 
 class Chunk(BaseModel):
     text: str
@@ -13,7 +15,7 @@ class Chunk(BaseModel):
 
 class IngestTextRequest(BaseModel):
     title: str = Field(min_length=1)
-    text: str = Field(min_length=1, max_length=3_000_000)
+    text: MaxText
     author: str | None = None
     published_date: date | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
