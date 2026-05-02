@@ -8,13 +8,13 @@ from fastapi import APIRouter, HTTPException
 from app.chunking import chunk_text
 from app.db import ConnDep
 from app.embeddings import embed_chunks
-from app.models import IngestTextRequest, IngestTextResponse
+from app.models import IngestTextRequest, IngestResponse
 
 router = APIRouter()
 
 
-@router.post("/text", response_model=IngestTextResponse)
-def ingest_text(req: IngestTextRequest, conn: ConnDep) -> IngestTextResponse:
+@router.post("/text", response_model=IngestResponse)
+def ingest_text(req: IngestTextRequest, conn: ConnDep) -> IngestResponse:
     text = req.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is empty after stripping whitespace")
@@ -32,7 +32,7 @@ def ingest_text(req: IngestTextRequest, conn: ConnDep) -> IngestTextResponse:
         row = cur.fetchone()
         if row is not None:
             existing_id, n_chunks = row
-            return IngestTextResponse(document_id=existing_id, n_chunks=n_chunks)
+            return IngestResponse(document_id=existing_id, n_chunks=n_chunks)
 
     chunks = chunk_text(text)
     if not chunks:
@@ -92,6 +92,6 @@ def ingest_text(req: IngestTextRequest, conn: ConnDep) -> IngestTextResponse:
                 (content_hash,),
             )
             existing_id, n_chunks = cur.fetchone()
-        return IngestTextResponse(document_id=existing_id, n_chunks=n_chunks)
+        return IngestResponse(document_id=existing_id, n_chunks=n_chunks)
 
-    return IngestTextResponse(document_id=document_id, n_chunks=len(chunks))
+    return IngestResponse(document_id=document_id, n_chunks=len(chunks))

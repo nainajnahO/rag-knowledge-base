@@ -21,6 +21,6 @@ class IngestTextRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class IngestTextResponse(BaseModel):
+class IngestResponse(BaseModel):
     document_id: UUID
     n_chunks: int
