@@ -58,6 +58,14 @@ class RetrievedChunk(BaseModel):
     Shared between GET /search (wrapped in SearchResponse.results) and POST
     /chat (subclassed by ChatSource which adds `cited` / `cited_text` per
     DECISIONS.md §8).
+
+    `score` semantics depend on the pipeline stage. `app.retrieval.retrieve`
+    populates it with the RRF fusion score (small numbers, ≤ 0.0328); the
+    rerank stage (`app.rerank.rerank`) overwrites it with Voyage's
+    `relevance_score`. Routes call rerank before returning, so the score
+    seen by API clients is always the rerank score. It's not calibrated
+    across queries — Voyage doesn't claim cross-query stability — so don't
+    threshold on it.
     """
 
     chunk_id: UUID
@@ -119,8 +127,8 @@ class ChatResponse(BaseModel):
 
     `stop_reason` is passed through from Anthropic so clients can detect
     `max_tokens` truncation or `refusal` rather than treating an
-    incomplete answer as a complete one. None on the threshold-gate
-    refusal path (no Anthropic call was made).
+    incomplete answer as a complete one. None on the structural
+    empty-retrieval refusal path (no Anthropic call was made).
     """
 
     answer: str

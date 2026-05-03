@@ -152,7 +152,7 @@ CREATE INDEX idx_chunks_embedding
     WITH (m = 16, ef_construction = 64);
 ```
 
-The `tsv` column and its GIN index land later, in the hybrid-search step (§16, Step 7). They're scaffolding for the optional lexical lane and don't belong in the must-have schema.
+The `tsv` column and its GIN index land in Step 7 (§7) — `tsvector GENERATED ALWAYS AS (to_tsvector('simple', text)) STORED` plus a GIN index for the lexical lane of hybrid retrieval.
 
 **Filter API on `/search`:**
 - Typed query params: `author`, `published_after`, `published_before`
@@ -213,7 +213,7 @@ PyMuPDF is dual-licensed: AGPL by default, with a commercial license available f
 
 **Why iterative scan and not over-fetch CTE (revisited).** During PR #18 review we re-examined whether to swap `SET LOCAL hnsw.iterative_scan` for an over-fetch CTE pattern (inner CTE pulls top-200 by distance, outer JOIN+filter+LIMIT k). Verified the alternative empirically with `EXPLAIN ANALYZE` on the live DB: at the small-corpus / no-HNSW-engaged case, our current shape is **strictly better** — 0.16ms vs 0.28ms execution, 38 vs 67 buffer hits, and it has no underfill failure mode (the JOIN+filter eliminates rows before the sort, where over-fetch CTE truncates to 200 candidates and only then filters). The case for over-fetch CTE was never the no-HNSW path; it was decoupling from the planner's HNSW decision when HNSW *would* be useful but the planner refuses. pgvector 0.8.0's improved cost model is supposed to fix that planner reluctance directly — going back to over-fetch CTE in 2026 is "doing things the pre-0.8.0 way." Decision: keep `SET LOCAL hnsw.iterative_scan`, accept the validation gap, trust pgvector's design over re-implementing it in SQL. Issue #19 closed with these findings.
 
-**Score range:** the SELECT computes `1 - (embedding <=> :q)` where `<=>` is cosine distance in `[0, 2]`, so `score ∈ [-1, 1]` mathematically. voyage-4 embeddings are L2-normalized, and natural-language pairs almost always score ≥ 0; negative scores indicate the query and chunk are pointing in opposite directions in vector space (rare in practice).
+**Internal cosine-derived score** (not the API-exposed score after Step 7): the dense-lane vec CTE in `app/retrieval.py` orders by `c.embedding <=> %(query_vec)s::vector`, where `<=>` is cosine distance in `[0, 2]`. Internally, `1 - distance ∈ [-1, 1]` mathematically; voyage-4 embeddings are L2-normalized, and natural-language pairs almost always land ≥ 0. **The API does not surface this score.** What clients see in the `/search` and `/chat` responses is Voyage's rerank `relevance_score` — see §7.2. The cosine score is purely an ordering input to the RRF fusion, not a client-visible quantity.
 
 ---
 
@@ -237,27 +237,48 @@ PyMuPDF is dual-licensed: AGPL by default, with a commercial license available f
 
 In the SQL sketch below, `$1` is the query embedding, produced by the same embedder module used during ingestion but called with `input_type="query"` per §2's API usage notes; `$2` is the raw query string.
 
-**Implementation sketch** *(the `tsv` column referenced below lands later, in the hybrid-search step (§16, Step 7); the must-have schema omits it)*:
+**Implementation sketch** (matches what shipped in `app/retrieval.py`):
 
 ```sql
 WITH vec AS (
-  SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank
-  FROM chunks ORDER BY embedding <=> $1 LIMIT 50
+  SELECT c.id,
+         ROW_NUMBER() OVER (ORDER BY c.embedding <=> $1) AS rank
+  FROM chunks c JOIN documents d ON d.id = c.document_id
+  WHERE  <metadata filters>
+  ORDER BY c.embedding <=> $1 LIMIT 50
 ),
 lex AS (
-  SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank(tsv, q) DESC) AS rank
-  FROM chunks, plainto_tsquery('simple', $2) q
-  WHERE tsv @@ q LIMIT 50
+  SELECT c.id,
+         ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.tsv, q) DESC) AS rank
+  FROM chunks c JOIN documents d ON d.id = c.document_id,
+       plainto_tsquery('simple', $2) q
+  WHERE c.tsv @@ q
+    AND  <metadata filters>
+  ORDER BY ts_rank_cd(c.tsv, q) DESC LIMIT 50
+),
+fused AS (
+  SELECT COALESCE(vec.id, lex.id) AS id,
+         COALESCE(1.0/(60+vec.rank), 0) + COALESCE(1.0/(60+lex.rank), 0) AS score
+  FROM vec
+  FULL OUTER JOIN lex ON vec.id = lex.id
 )
-SELECT c.id, c.text, c.document_id,
-       COALESCE(1.0/(60+vec.rank), 0) + COALESCE(1.0/(60+lex.rank), 0) AS rrf_score
-FROM chunks c
-LEFT JOIN vec ON c.id = vec.id
-LEFT JOIN lex ON c.id = lex.id
-WHERE vec.id IS NOT NULL OR lex.id IS NOT NULL
-ORDER BY rrf_score DESC
-LIMIT 10;
+SELECT c.*, d.*, fused.score
+FROM fused
+JOIN chunks c    ON c.id = fused.id
+JOIN documents d ON d.id = c.document_id
+ORDER BY fused.score DESC
+LIMIT $3;
 ```
+
+**Three load-bearing details** that diverge from a naïve sketch:
+
+1. **`FULL OUTER JOIN`, not `LEFT JOIN`.** A `LEFT JOIN` anchored on either lane silently drops rows the other lane found exclusively — defeating fusion for the queries the lexical lane exists to catch (rare proper nouns, IDs, technical jargon). pgvector's `rrf.py` and Supabase's `hybrid_search` both use `FULL OUTER JOIN`.
+2. **`ts_rank_cd`, not `ts_rank`.** Cover-density variant — proximity-aware. Free upgrade and what both reference examples use.
+3. **Metadata filters live inside both CTEs**, not the outer SELECT. A selective filter applied late would leave each lane's top-50 mostly empty after post-filter rejection; applied early, each lane's candidate pool is already 50 post-filter survivors.
+
+**Primary sources for the recipe:**
+- pgvector RRF example — github.com/pgvector/pgvector-python/blob/master/examples/hybrid_search/rrf.py
+- Supabase hybrid_search RPC — supabase.com/docs/guides/ai/hybrid-search
 
 ### 7.1 Lexical lane language config — `'simple'`
 
@@ -273,6 +294,7 @@ The `tsvector` column needs a Postgres text-search config that governs tokenizat
 - The morphology and stop-word lift of a language-specific config (`"policies"` matching `"policy"`) is partially absorbed by voyage-4 in the dense lane — semantically equivalent inflections produce nearby vectors.
 - The brief is silent on language. `'english'` would be a bet that *penalizes* non-English content rather than just leaving it un-optimized.
 - Cross-language retrieval is unaffected by this choice — voyage-4 (multilingual) carries that case through the dense lane regardless of what we put in the lexical lane.
+- **Note** that pgvector's reference example and Supabase's `hybrid_search` both use `'english'` by default. We deviate deliberately because *this* corpus is verifiably mixed-language at retrieval time: the experimental ingest covered English academic papers alongside Swedish thesis drafts, Swedish grade reports, and Swedish real-estate listings. `'english'` would mis-stem the Swedish content; `'simple'` is the right pick for a multilingual KB even though it's not the most common default.
 
 **Migration notes — `'simple'` → per-document language tracking (~half-day):**
 - Add `language regconfig NOT NULL` on `documents` (default `'simple'`) — detected at upload via a small library (`langdetect`, `fasttext-langid`) or supplied by the client.
@@ -282,6 +304,23 @@ The `tsvector` column needs a Postgres text-search config that governs tokenizat
 - Recreate the GIN index.
 - At query time: detect (or accept via query param) the query's language, parse with `plainto_tsquery(detected_lang, :q)`.
 - Tracked in [issue #3](https://github.com/nainajnahO/rag-knowledge-base/issues/3).
+
+### 7.2 Reranker — Voyage `rerank-2.5`
+
+**Decision:** After RRF returns 50 candidates, rerank with Voyage `rerank-2.5` and keep the top-K (K=10 for `/search`'s default, K=8 for `/chat` per §8). The rerank `relevance_score` replaces the RRF score on the returned `RetrievedChunk`. Lives in `app/rerank.py` as a thin module called by routes — retrieval and reranking are separate pipeline stages, not one fused operation.
+
+**Alternatives considered:**
+- **No reranker** (the previous §15 deferred-cut framing — "RRF gets us most of the way there"). Anthropic's *Introducing Contextual Retrieval* post documents rerank as the fourth and final stage of their recommended pipeline; Voyage ships `rerank-2.5` in the embedding stack we already use. The marginal cost is ~30 lines, one extra Voyage call, ~150ms latency, and reuses `map_voyage_errors`. Small enough that "follow the documented recipe step" is the proportional choice over "skip a documented step." We don't claim a measured quality number on this corpus — the regression in this PR validates that rerank doesn't *break* the queries hybrid alone fixes (Q4), which is the negative-evidence claim worth making.
+- **Cohere `rerank-3.5`** or other cross-encoders. Voyage is Anthropic's recommended embedding/reranking partner — same vendor as `voyage-4`, same SDK, same error class hierarchy reused in `app/rerank.py`. Switching would split the upstream story.
+- **LLM-as-reranker** (have Claude score chunks). 60× more expensive per Voyage's published comparison and adds an extra LLM round-trip on the hot path.
+
+**Why this choice:**
+- The pipeline shape Anthropic's *Introducing Contextual Retrieval* post documents (anthropic.com/news/contextual-retrieval) is retrieve → rerank → top-K to LLM. We ship the rerank step here. The blog also recommends contextual-embedding rewriting (deferred — see §15's `voyage-context-3` row); we adopt one of the two extensions Anthropic recommends layering on top of vanilla hybrid, not both.
+- Reuses `map_voyage_errors` from `app/embeddings.py` — same 401/429/500/503 hierarchy across both Voyage calls, no new error code paths to reason about.
+- Voyage doesn't claim `relevance_score` is calibrated across queries (the docs make no such statement, and never publish a recommended threshold). We do **not** apply a score threshold; see §8 for how refusal is handled instead.
+- Single SDK call per `/search` or `/chat`, ~150ms added latency, ~$0.005 per call at the documented price.
+
+**Migration notes:** Model alias is in one constant (`RERANK_MODEL` in `app/rerank.py`). Swap to a Cohere reranker by replacing the body of `rerank()` and adding a `map_cohere_errors` context manager mirroring §11; signature stays the same.
 
 ---
 
@@ -303,14 +342,14 @@ The `tsvector` column needs a Postgres text-search config that governs tokenizat
 - The system prompt becomes shorter and easier to audit because the API handles citation formatting; we only have to enforce three guardrails (sources-only, refusal allowed, no speculation).
 - Native Anthropic shapes are passed through to the response (`answer_blocks`) so a client can render claim-with-quote inline if it wants. A flat `answer: str` is also returned for simple display.
 
-**Anti-hallucination guardrails (still all four; mechanism shifts):**
+**Anti-hallucination guardrails (four — one mechanism revised in Step 7):**
 
 1. **System prompt forbids external knowledge.** *"You answer questions using only the provided search results... Do not use prior knowledge. Do not speculate."* The single most important line.
 2. **Refusal allowed and encouraged.** *"If the search results do not contain enough information to answer the question, say: 'I don't have enough information in the provided sources to answer this.'"* In-prompt instruction.
-3. **Score threshold gate (cosine ≥ 0.5).** Lives in the route layer, not the prompt: if `chunks[0].score < 0.5` (or 0 chunks retrieved), don't call Anthropic — return the refusal response with `sources: []`. Saves a ~$0.02 call when retrieval is hopeless.
+3. **Structural empty-retrieval guard.** Lives in the route layer: if `retrieve()` followed by `rerank()` returns zero candidates, return the refusal response with `sources: []` without calling Anthropic. This fires when metadata filters reject every chunk or the corpus is empty — there's literally nothing to send. **No score threshold.** The previous gate (cosine ≥ 0.5, dropped in Step 7) doesn't fit the new pipeline: Anthropic's *Introducing Contextual Retrieval* post, pgvector's RRF example, and Supabase's `hybrid_search` RPC all take top-K unconditionally; none threshold rerank scores. Voyage doesn't document `relevance_score` as a calibrated `[0,1]` quantity, so picking a fixed cutoff would tune against an uncalibrated, query-dependent signal. Refusal on low-relevance retrieval is owned by Claude's response to guardrails #1 and #2 — the pattern Anthropic, pgvector, and Supabase all use.
 4. **Chunk metadata passed automatically.** Each `search_result` block has a `title` field set to `"<doc_title> (<published_date>)"` (date when present). The model sees this natively without any prompt-engineering — no need to inject `Title: ... (date)` headers into chunk text.
 
-**Top-K retrieval for chat:** 8 chunks above threshold 0.5. Sweet spot — enough context for nuanced questions without dilution from low-relevance chunks.
+**Top-K retrieval for chat:** 8 chunks. The rerank stage (§7.2) trims a 50-candidate RRF pool to the top 8, which carry semantically-relevant content for nuanced questions without dilution.
 
 **Per-chunk packaging.** Each retrieved chunk → one `search_result` content block:
 
@@ -370,7 +409,7 @@ One block per chunk for this PR. Splitting chunks into sentence-level blocks wou
 
 `answer` is the concatenation of all `answer_blocks[i].text` for clients that just want a string. `answer_blocks` is Anthropic's native shape (preserving the per-block citation linkage). `sources` is all 8 retrieved chunks (not just cited ones, per the original §8 intent — let the reviewer see what the model had access to). `cited: bool` distinguishes which chunks the model actually grounded claims on; `cited_text: list[str]` carries the verbatim quotes (multiple if the model cited the same chunk in multiple `answer_blocks`). `stop_reason` is passed through from Anthropic — `"end_turn"` is the healthy case; clients should treat `"max_tokens"` as a truncation signal and `"refusal"` as a model-level decline.
 
-**Refusal response shape** (top score < 0.5 OR 0 chunks retrieved):
+**Refusal response shape** (zero chunks retrieved after rerank — guardrail #3):
 
 ```json
 {
@@ -518,7 +557,6 @@ Each of these will become a GitHub Issue and an entry in the README's "next step
 | **Parent-child / hierarchical chunking** | Real retrieval-quality win, but complicates retrieval and chat. Architecture is designed to make it cheap. | ~1 day |
 | **voyage-context-3 contextual embeddings** | Same dimension as voyage-4 → cheap migration. Better story to ship the standard voyage-4 model first; document-grouped batching adds complexity worth deferring. | ~half-day |
 | **Streaming responses on /chat** | Brief lists it as stretch. Demo is via curl; streaming complicates citation parsing for the reviewer. | ~few hours |
-| **Re-ranking with a cross-encoder** (Voyage `rerank-2.5`) | Real quality improvement but adds a dependency and another model API. RRF gets us most of the way there. Voyage's `rerank-2.5` (32K context, multilingual, instruction-following) is the natural drop-in given the rest of the stack. | ~half-day |
 | **Knowledge graph (entities + relations)** | Genuinely interesting, big rabbit hole. Not the foundation the brief asks for. | ~2-3 days |
 | **Per-document language tracking for multilingual lexical ranking** ([#3](https://github.com/nainajnahO/rag-knowledge-base/issues/3)) | Hybrid uses `'simple'` tsv config — covers any language adequately but skips per-language morphology and stop-word lift. Real per-language lexical morphology needs per-doc language detection. See §7.1. | ~half-day |
 | **Production logging/metrics/CI** | Brief explicitly excludes these. | n/a |
@@ -537,7 +575,7 @@ PRs are sized to be individually reviewable. Each merges to `main` with a merge 
 4. **Step 4** — `POST /document`: pymupdf extraction + content-hash dedupe.
 5. **Step 5** — `GET /search`: vector similarity with metadata filters via JOIN. **Done.** k=10/max=50, no score threshold, AND-across-keys metadata filters, HNSW iterative scan with `strict_order` (§6.1), shared `RetrievedChunk` model with `/chat`. See PR for the full set of locked design choices.
 6. **Step 6** — `POST /chat`: retrieval + Sonnet 4.6 + structured citations + four guardrails. **Done.** Path B chosen during planning research after surfacing Anthropic's first-class Search Result content blocks (§8 rewrite). Response carries `answer` (display), `answer_blocks` (native Anthropic shape), and `sources` (all retrieved chunks with `cited` flag and verbatim `cited_text`). See PR for the full set of locked design choices.
-7. **Step 7** — Hybrid search: tsvector column + RRF query.
+7. **Step 7** — Hybrid search + rerank: tsvector column + RRF query, plus Voyage `rerank-2.5` over the 50-candidate fused pool. **Done.** Replaced dense `/search` and `/chat` retrieval with hybrid+rerank. Dropped the cosine-threshold gate from `/chat` per §8 guardrail #3 — refusal is now structural (empty-retrieval) plus model-driven (system prompt). Schema, retrieval SQL, and `app/rerank.py` shape verified against pgvector and Supabase reference examples; rerank choice and the absent-threshold pattern verified against Anthropic's *Introducing Contextual Retrieval*.
 8. **Step 8** — API key auth dependency.
 9. **Step 9** — Smoke tests (pytest).
 10. **Step 10** — README polish, sample documents demonstrating metadata filtering, curl/Postman collection, opening "deliberate cuts" issues.

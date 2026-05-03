@@ -1,8 +1,4 @@
-"""GET /search — dense vector retrieval with metadata filters (DECISIONS.md §6).
-
-Step 7 (hybrid search) will replace the call into `retrieval.retrieve` with a
-hybrid variant; the route shape stays the same.
-"""
+"""GET /search — hybrid retrieval + rerank (DECISIONS.md §7 / §7.2)."""
 
 from datetime import date
 from typing import Annotated
@@ -12,7 +8,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.db import ConnDep
 from app.models import SearchResponse
-from app.retrieval import Filters, retrieve
+from app.rerank import rerank
+from app.retrieval import RRF_CANDIDATES_PER_LANE, Filters, retrieve
 
 router = APIRouter()
 
@@ -60,5 +57,6 @@ def search(
         published_before=params.published_before,
         metadata=metadata,
     )
-    results = retrieve(conn, params.q, params.k, filters)
+    candidates = retrieve(conn, params.q, k=RRF_CANDIDATES_PER_LANE, filters=filters)
+    results = rerank(params.q, candidates, top_k=params.k)
     return SearchResponse(results=results)

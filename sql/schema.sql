@@ -25,9 +25,15 @@ CREATE TABLE chunks (
     text         TEXT         NOT NULL,
     token_count  INT          NOT NULL,
     embedding    vector(1024) NOT NULL,
+    -- DECISIONS.md §7 / §7.1: lexical lane for hybrid RRF. 'simple' config
+    -- is language-neutral so mixed-language corpora aren't mis-stemmed.
+    -- GENERATED so the column can never drift from `text`.
+    tsv          tsvector     GENERATED ALWAYS AS (to_tsvector('simple', text)) STORED,
     UNIQUE (document_id, ordinal)
 );
 
 CREATE INDEX idx_chunks_embedding
     ON chunks USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
+
+CREATE INDEX idx_chunks_tsv ON chunks USING GIN (tsv);

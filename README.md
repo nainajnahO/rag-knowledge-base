@@ -50,7 +50,7 @@ curl -X POST http://localhost:8000/document \
   -F "file=@Ahody hiring - work sample.pdf"
 # → {"document_id": "...", "n_chunks": 2}
 
-# 7. Search (top-k by cosine similarity; default k=10, max 50)
+# 7. Search (top-k by hybrid retrieval + Voyage rerank; default k=10, max 50)
 curl 'http://localhost:8000/search?q=revenue%20growth'
 
 # 7b. Search with metadata filters (AND across keys, single-value-per-key)
@@ -58,6 +58,10 @@ curl 'http://localhost:8000/search?q=plans&author=Eng%20Leadership&meta.departme
 # → {"results": [{"chunk_id": "...", "ordinal": 0, "document_id": "...",
 #                 "document_title": "...", "author": "...", "published_date": "...",
 #                 "metadata": {...}, "score": 0.57, "text": "..."}]}
+# `score` (in both /search and /chat responses) is Voyage rerank-2.5's
+# `relevance_score` (§7.2). It's not calibrated across queries, so don't
+# compare scores from different requests or threshold on a fixed value —
+# rank order within a single response is the meaningful signal.
 
 # 8. Chat — RAG with structured Anthropic citations
 curl -X POST http://localhost:8000/chat \
@@ -109,7 +113,7 @@ The full record of decisions, alternatives considered, and migration paths is in
 | **Chunking** | Recursive token-based: paragraph → sentence → word → token-offset fallback. 600 tokens / 15% overlap. | Respects natural boundaries when possible, predictable sizes always. The token-offset fallback keeps it correct in CJK / no-space scripts where Latin separators don't apply. ([§3](./DECISIONS.md#3-chunking-strategy)) |
 | **Schema** | Hybrid: typed columns for `title` / `author` / `published_date` + JSONB `metadata` with GIN. | Validated SQL filters where it matters, flexibility everywhere else. One row per document, one row per chunk; `documents.content_hash UNIQUE` for dedupe. ([§4](./DECISIONS.md#4-metadata-schema)) |
 | **Vector index** | HNSW, defaults `m=16, ef_construction=64`, cosine ops. | Production default in pgvector ≥0.5; best recall/speed tradeoff. IVFFlat has no advantage for new projects in 2026. ([§6](./DECISIONS.md#6-vector-index)) |
-| **Hybrid search** | Reciprocal Rank Fusion, `k=60`, lexical lane uses `'simple'` tsv config. | RRF is parameter-free, no score normalization needed, industry-standard in 2026. `'simple'` keeps the lexical lane language-neutral. (Step 7 — [§7](./DECISIONS.md#7-hybrid-search-fusion)) |
+| **Hybrid search + rerank** | RRF (`k=60`, 50 candidates per lane, `FULL OUTER JOIN`, `ts_rank_cd`, `'simple'` tsv config) → Voyage `rerank-2.5` → top-K. | RRF is parameter-free and no score normalization is needed; SQL shape mirrors pgvector's and Supabase's reference examples. Reranker is the natural drop-in given Voyage is Anthropic's recommended embedding partner — same SDK, same error hierarchy. ([§7](./DECISIONS.md#7-hybrid-search-fusion) / [§7.2](./DECISIONS.md#72-reranker--voyage-rerank-25)) |
 | **Citations** | Numbered inline (`[1]`, `[2]`); response includes every retrieved chunk with text + score + metadata. | The brief grades whether claims are *verifiable in seconds*. Returning all retrieved chunks (not just cited ones) lets the reviewer see what the model had access to. (Step 6 — [§8](./DECISIONS.md#8-citation-approach-the-load-bearing-one)) |
 | **Chat LLM** | Claude Sonnet 4.6, single-turn. | Production default for grounded RAG. Single-turn matches the brief literally; multi-turn opens a query-rewriting subproblem deferred to a follow-up. ([§9](./DECISIONS.md#9-chat-llm) / [§10](./DECISIONS.md#10-chat-shape--single-turn)) |
 
@@ -202,9 +206,9 @@ These skills are themselves the most concrete signal of how I work with Claude: 
 
 Honest list of what's true *right now*. See [`DECISIONS.md §15`](./DECISIONS.md#15-deliberate-cuts-and-why) for the full table of deliberate cuts with effort estimates for each.
 
-- **DB connection is held during upstream LLM/embedding calls.** Each request borrows a pooled connection via `Depends(get_conn)` for its full lifetime, including the (potentially-slow) Voyage embedding call and (for `/chat`) the Anthropic LLM call. Affects every endpoint that calls an upstream — `/text`, `/document`, `/search`, and `/chat`. Pool size is 1–10. Under any meaningful concurrency this would exhaust the pool; not addressed at take-home scale but flagged in [PR #7](https://github.com/nainajnahO/rag-knowledge-base/pull/7)'s body. The fix (release-before-upstream + reacquire-after) is a focused half-day.
+- **DB connection is held during upstream LLM/embedding calls.** Each request borrows a pooled connection via `Depends(get_conn)` for its full lifetime. Affects every endpoint that calls an upstream: `/text` and `/document` each make 1 Voyage embed call, `/search` makes 2 (Voyage embed + Voyage rerank), and `/chat` makes 3 sequential calls (Voyage embed + Voyage rerank + Anthropic). Pool size is 1–10. Under any meaningful concurrency this would exhaust the pool, and Step 7's rerank stage stretched the worst-case time-per-held-connection longer than what [PR #7](https://github.com/nainajnahO/rag-knowledge-base/pull/7) originally flagged. Not addressed at take-home scale. The fix (release-before-upstream + reacquire-after) is a focused half-day.
 - **HNSW is approximate.** Recall is typically >95%, not 100%. A query depending on a single rare chunk could miss it. Mitigation if ever needed: `SET LOCAL hnsw.ef_search = 100` per query — trades ~1ms latency for higher recall. ([§6](./DECISIONS.md#6-vector-index))
-- **Lexical lane is `'simple'` config (when Step 7 lands).** Language-neutral — keeps non-English content from being mis-stemmed by an English-specific config, but skips per-language morphology lift. Tracked in [issue #3](https://github.com/nainajnahO/rag-knowledge-base/issues/3); rationale in [§7](./DECISIONS.md#7-hybrid-search-fusion) (sub-section 7.1).
+- **Lexical lane uses `'simple'` config.** Language-neutral — keeps non-English content from being mis-stemmed by an English-specific config, but skips per-language morphology lift. Tracked in [issue #3](https://github.com/nainajnahO/rag-knowledge-base/issues/3); rationale in [§7](./DECISIONS.md#7-hybrid-search-fusion) (sub-section 7.1).
 - **PyMuPDF is AGPL.** PDF extraction (`POST /document`) uses `pymupdf` for plain-text quality. Strict reading of AGPL would require source disclosure for a commercial network-deployed RAG service. Migration path to `pypdf` is one module, ~30 lines, same-day swap. ([§5](./DECISIONS.md#5-pdf-extraction))
 - **Single-turn `/chat`.** Multi-turn requires query rewriting (the latest user turn alone has no semantic content to retrieve on; the full conversation pollutes embeddings). Doing this badly is worse than not doing it. The brief explicitly asks for single-turn. ([§10](./DECISIONS.md#10-chat-shape--single-turn))
 - **Dedupe is silent.** If you `POST /text` with content that matches an existing document by SHA-256 (after stripping whitespace), the existing `document_id` is returned and any new `title` / `author` / `published_date` / `metadata` in the request is ignored. There is no separate "update metadata" endpoint. ([§12](./DECISIONS.md#12-upload-dedupe))
