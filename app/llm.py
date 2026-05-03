@@ -22,9 +22,10 @@ from app.settings import settings
 CHAT_MODEL = "claude-sonnet-4-6"
 CHAT_MAX_TOKENS = 2048
 
-# DECISIONS.md §8 guardrail #3 — score threshold gate. Top retrieved chunk
-# below this cosine similarity → refuse without calling Anthropic.
-CHAT_SCORE_THRESHOLD = 0.5
+# Single source of truth for the refusal sentence. Interpolated into
+# SYSTEM_PROMPT below and imported by the route's threshold-gate path
+# so both refusal channels emit identical text.
+REFUSAL_TEXT = "I don't have enough information in the provided sources to answer this."
 
 # DECISIONS.md §8 guardrails #1, #2 — only-sources and refusal allowed.
 # Citation formatting is handled by the API (Search Result content blocks
@@ -32,8 +33,7 @@ CHAT_SCORE_THRESHOLD = 0.5
 SYSTEM_PROMPT = (
     "You answer questions using only the provided search results. If the "
     "search results do not contain enough information to answer the question, "
-    'say: "I don\'t have enough information in the provided sources to '
-    'answer this." Do not use prior knowledge. Do not speculate.'
+    f'say: "{REFUSAL_TEXT}" Do not use prior knowledge. Do not speculate.'
 )
 
 

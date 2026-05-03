@@ -1,10 +1,11 @@
 """POST /chat — RAG with structured Anthropic citations (DECISIONS.md §8 Path B)."""
 
+import anthropic
 from fastapi import APIRouter
 from pydantic import BaseModel, Field, field_validator
 
 from app.db import ConnDep
-from app.llm import CHAT_SCORE_THRESHOLD, generate_answer
+from app.llm import REFUSAL_TEXT, generate_answer
 from app.models import (
     AnswerBlock,
     ChatResponse,
@@ -19,10 +20,11 @@ router = APIRouter()
 # DECISIONS.md §8 — top-K retrieval for chat.
 CHAT_TOP_K = 8
 
-# Refusal text mirrors the SYSTEM_PROMPT instruction so the
-# threshold-gate path produces the same string the model would emit
-# under guardrail #2.
-REFUSAL_TEXT = "I don't have enough information in the provided sources to answer this."
+# DECISIONS.md §8 guardrail #3 — score threshold gate. Top retrieved chunk
+# below this cosine similarity → refuse without calling Anthropic. Lives
+# here (not in app/llm.py) because it's a route-level decision: whether
+# to call the LLM at all.
+CHAT_SCORE_THRESHOLD = 0.5
 
 
 class ChatRequest(BaseModel):
@@ -63,7 +65,7 @@ def _refusal_response() -> ChatResponse:
 
 
 def _build_response(
-    message, retrieved: list[RetrievedChunk]
+    message: anthropic.types.Message, retrieved: list[RetrievedChunk]
 ) -> ChatResponse:
     """Map Anthropic Message → our ChatResponse.
 
