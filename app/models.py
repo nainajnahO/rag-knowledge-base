@@ -55,8 +55,9 @@ class IngestResponse(BaseModel):
 class RetrievedChunk(BaseModel):
     """One chunk + its parent-document context, returned by retrieval.
 
-    Shared between GET /search (wrapped in SearchResponse.results) and the
-    upcoming POST /chat (extended with `citation: int` per DECISIONS.md §8).
+    Shared between GET /search (wrapped in SearchResponse.results) and POST
+    /chat (subclassed by ChatSource which adds `cited` / `cited_text` per
+    DECISIONS.md §8).
     """
 
     chunk_id: UUID
@@ -72,3 +73,57 @@ class RetrievedChunk(BaseModel):
 
 class SearchResponse(BaseModel):
     results: list[RetrievedChunk]
+
+
+class CitationRef(BaseModel):
+    """One citation attached to an AnswerBlock — slim view of Anthropic's
+    search_result_location. `chunk_id` is mapped from the SDK's `source`
+    field; `document_title` and `published_date` are looked up from the
+    retrieved chunk (not echoed from Anthropic) so the citation view stays
+    in lockstep with `ChatSource` — same field names, same content.
+    """
+
+    chunk_id: UUID
+    document_title: str
+    published_date: date | None
+    cited_text: str
+
+
+class AnswerBlock(BaseModel):
+    """One text block from Claude's response, optionally with attached
+    citations. Mirrors Anthropic's response shape (a list of these is what
+    `client.messages.create` returns under .content for text blocks).
+    """
+
+    text: str
+    citations: list[CitationRef] = Field(default_factory=list)
+
+
+class ChatSource(RetrievedChunk):
+    """Retrieved chunk + chat-specific annotations.
+
+    `cited` is True iff Claude grounded at least one claim on this chunk.
+    `cited_text` collects the verbatim quotes — multiple if the chunk was
+    cited from more than one answer block.
+    """
+
+    cited: bool = False
+    cited_text: list[str] = Field(default_factory=list)
+
+
+class ChatResponse(BaseModel):
+    """POST /chat response. Carries both the flat `answer` string (for
+    simple display) and the native Anthropic block list (`answer_blocks`)
+    so clients can render claim-with-quote inline. `sources` is all
+    retrieved chunks (cited or not), per DECISIONS.md §8.
+
+    `stop_reason` is passed through from Anthropic so clients can detect
+    `max_tokens` truncation or `refusal` rather than treating an
+    incomplete answer as a complete one. None on the threshold-gate
+    refusal path (no Anthropic call was made).
+    """
+
+    answer: str
+    answer_blocks: list[AnswerBlock]
+    sources: list[ChatSource]
+    stop_reason: str | None

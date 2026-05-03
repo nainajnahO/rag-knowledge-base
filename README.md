@@ -58,6 +58,34 @@ curl 'http://localhost:8000/search?q=plans&author=Eng%20Leadership&meta.departme
 # → {"results": [{"chunk_id": "...", "ordinal": 0, "document_id": "...",
 #                 "document_title": "...", "author": "...", "published_date": "...",
 #                 "metadata": {...}, "score": 0.57, "text": "..."}]}
+
+# 8. Chat — RAG with structured Anthropic citations
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question": "How much did revenue grow in Q3 2025?"}'
+# → {
+#     "answer": "Revenue grew 12% in Q3 2025, driven by enterprise contracts.",
+#     "answer_blocks": [
+#       {
+#         "text": "Revenue grew 12% in Q3 2025, driven by enterprise contracts.",
+#         "citations": [
+#           {
+#             "chunk_id": "...",
+#             "document_title": "Q3 Revenue Memo",
+#             "published_date": "2025-10-15",
+#             "cited_text": "Revenue grew 12% in Q3 2025 to $4.2M, driven by enterprise contracts."
+#           }
+#         ]
+#       }
+#     ],
+#     "sources": [
+#       {"chunk_id": "...", "score": 0.87, "cited": true,
+#        "cited_text": ["Revenue grew 12% in Q3 2025 to $4.2M, driven by enterprise contracts."],
+#        "text": "...", "document_title": "Q3 Revenue Memo", ...},
+#       {"chunk_id": "...", "score": 0.31, "cited": false, "cited_text": [], ...}
+#     ],
+#     "stop_reason": "end_turn"
+#   }
 ```
 
 > **`meta.*` filter limitations.** Query-string values are always strings, so `meta.year=2025` builds the JSONB containment predicate `metadata @> '{"year": "2025"}'` and won't match a document ingested with the integer `{"year": 2025}` (JSONB containment requires exact type match). To filter on integer/boolean metadata today, ingest those values as strings. Nested keys (`meta.a.b=value`) and empty keys (`meta.=value`) are accepted as flat keys, not unpacked — `metadata @> '{"a.b": "value"}'`. The `meta.*` parameter shape is also not surfaced in `/openapi.json` (Swagger UI), since FastAPI can't infer dynamic key prefixes; this README is the canonical reference.
@@ -111,7 +139,7 @@ docker compose down -v && docker compose up -d
 | POST   | `/text`     | live       |
 | POST   | `/document` | live       |
 | GET    | `/search`   | live       |
-| POST   | `/chat`     | Step 6     |
+| POST   | `/chat`     | live       |
 
 > Curl examples and a Postman collection land alongside the endpoints.
 
@@ -174,7 +202,7 @@ These skills are themselves the most concrete signal of how I work with Claude: 
 
 Honest list of what's true *right now*. See [`DECISIONS.md §15`](./DECISIONS.md#15-deliberate-cuts-and-why) for the full table of deliberate cuts with effort estimates for each.
 
-- **DB connection is held during the Voyage upstream call.** Each request borrows a pooled connection via `Depends(get_conn)` for its full lifetime, including the (potentially-slow) Voyage embedding call. Affects every endpoint that calls Voyage — `/text`, `/document`, and `/search` (which embeds the query before opening its retrieval transaction). Pool size is 1–10. Under any meaningful concurrency this would exhaust the pool; not addressed at take-home scale but flagged in [PR #7](https://github.com/nainajnahO/rag-knowledge-base/pull/7)'s body. The fix (release-before-upstream + reacquire-after) is a focused half-day.
+- **DB connection is held during upstream LLM/embedding calls.** Each request borrows a pooled connection via `Depends(get_conn)` for its full lifetime, including the (potentially-slow) Voyage embedding call and (for `/chat`) the Anthropic LLM call. Affects every endpoint that calls an upstream — `/text`, `/document`, `/search`, and `/chat`. Pool size is 1–10. Under any meaningful concurrency this would exhaust the pool; not addressed at take-home scale but flagged in [PR #7](https://github.com/nainajnahO/rag-knowledge-base/pull/7)'s body. The fix (release-before-upstream + reacquire-after) is a focused half-day.
 - **HNSW is approximate.** Recall is typically >95%, not 100%. A query depending on a single rare chunk could miss it. Mitigation if ever needed: `SET LOCAL hnsw.ef_search = 100` per query — trades ~1ms latency for higher recall. ([§6](./DECISIONS.md#6-vector-index))
 - **Lexical lane is `'simple'` config (when Step 7 lands).** Language-neutral — keeps non-English content from being mis-stemmed by an English-specific config, but skips per-language morphology lift. Tracked in [issue #3](https://github.com/nainajnahO/rag-knowledge-base/issues/3); rationale in [§7](./DECISIONS.md#7-hybrid-search-fusion) (sub-section 7.1).
 - **PyMuPDF is AGPL.** PDF extraction (`POST /document`) uses `pymupdf` for plain-text quality. Strict reading of AGPL would require source disclosure for a commercial network-deployed RAG service. Migration path to `pypdf` is one module, ~30 lines, same-day swap. ([§5](./DECISIONS.md#5-pdf-extraction))
