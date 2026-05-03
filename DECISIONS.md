@@ -539,12 +539,13 @@ No retries, no circuit breakers, no custom exception hierarchy.
 
 ## 14. API key auth (stretch goal)
 
-**Decision:** Single API key, FastAPI dependency injection.
+**Decision:** Skipped — see §15. The brief lists auth as a relevance-gated stretch goal ("if you find them relevant to the task — optional"), and the threat model is empty for a local-only single-tenant demo. The sketch below is retained as the shape that would ship if relevance changed.
 
-**Why:**
-- Brief lists it as stretch and says even a simple API key is enough.
-- ~5 lines: a dependency that reads `Authorization: Bearer <key>` and compares against env var `API_KEY`.
-- Cheap signal of production-awareness. Deserves the half-PR it costs.
+**Sketch (not implemented):**
+- Single bearer token compared against env var `API_KEY` using `secrets.compare_digest`.
+- Header: `Authorization: Bearer <key>`. Implemented via FastAPI's built-in `HTTPBearer(auto_error=False)` so the dependency owns the response shape (401 + `WWW-Authenticate: Bearer`) rather than letting FastAPI emit a 403.
+- Wired at router scope on the four data-touching routers; `/health` exempt for liveness probes.
+- ~half-day to ship including the empty-key bypass guard (`compare_digest("", "")` is `True`).
 
 ---
 
@@ -559,6 +560,7 @@ Each of these will become a GitHub Issue and an entry in the README's "next step
 | **Parent-child / hierarchical chunking** | Real retrieval-quality win, but complicates retrieval and chat. Architecture is designed to make it cheap. | ~1 day |
 | **voyage-context-3 contextual embeddings** | Same dimension as voyage-4 → cheap migration. Better story to ship the standard voyage-4 model first; document-grouped batching adds complexity worth deferring. | ~half-day |
 | **Streaming responses on /chat** | Brief lists it as stretch. Demo is via curl; streaming complicates citation parsing for the reviewer. | ~few hours |
+| **API key auth** | Brief lists it as relevance-gated stretch ("if you find them relevant"). Threat model is empty for a local-only single-tenant demo: no network exposure, no multi-user model, and upstream costs are already gated by `VOYAGE_API_KEY` / `ANTHROPIC_API_KEY` (server-side, operator-controlled). Adding a key would clutter every README curl example without protecting anything in scope. See §14 sketch for the shape if relevance changed. | ~half-day |
 | **Knowledge graph (entities + relations)** | Genuinely interesting, big rabbit hole. Not the foundation the brief asks for. | ~2-3 days |
 | **Per-document language tracking for multilingual lexical ranking** ([#3](https://github.com/nainajnahO/rag-knowledge-base/issues/3)) | Hybrid uses `'simple'` tsv config — covers any language adequately but skips per-language morphology and stop-word lift. Real per-language lexical morphology needs per-doc language detection. See §7.1. | ~half-day |
 | **Production logging/metrics/CI** | Brief explicitly excludes these. | n/a |
@@ -578,7 +580,7 @@ PRs are sized to be individually reviewable. Each merges to `main` with a merge 
 5. **Step 5** — `GET /search`: vector similarity with metadata filters via JOIN. **Done.** k=10/max=50, no score threshold, AND-across-keys metadata filters, HNSW iterative scan with `strict_order` (§6.1), shared `RetrievedChunk` model with `/chat`. See PR for the full set of locked design choices.
 6. **Step 6** — `POST /chat`: retrieval + Sonnet 4.6 + structured citations + four guardrails. **Done.** Path B chosen during planning research after surfacing Anthropic's first-class Search Result content blocks (§8 rewrite). Response carries `answer` (display), `answer_blocks` (native Anthropic shape), and `sources` (all retrieved chunks with `cited` flag and verbatim `cited_text`). See PR for the full set of locked design choices.
 7. **Step 7** — Hybrid search + rerank: tsvector column + RRF query, plus Voyage `rerank-2.5` over the 50-candidate fused pool. **Done.** Replaced dense `/search` and `/chat` retrieval with hybrid+rerank. Dropped the cosine-threshold gate from `/chat` per §8 guardrail #3 — refusal is now structural (empty-retrieval) plus model-driven (system prompt). Schema, retrieval SQL, and `app/rerank.py` shape verified against pgvector and Supabase reference examples; rerank choice and the absent-threshold pattern verified against Anthropic's *Introducing Contextual Retrieval*.
-8. **Step 8** — API key auth dependency.
+8. **Step 8** — API key auth dependency. **Skipped** — see §15. Threat model is empty for a local-only single-tenant demo; the brief gates this stretch goal on relevance and there's nothing in scope for a key to defend.
 9. **Step 9** — Smoke tests (pytest).
 10. **Step 10** — README polish, sample documents demonstrating metadata filtering, curl/Postman collection, opening "deliberate cuts" issues.
 
