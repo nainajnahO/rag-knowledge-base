@@ -41,5 +41,9 @@ def rerank(
     reranked: list[RetrievedChunk] = []
     for r in result.results:
         chunk = candidates[r.index]
-        reranked.append(chunk.model_copy(update={"score": r.relevance_score}))
+        reranked.append(
+            RetrievedChunk.model_validate(
+                {**chunk.model_dump(), "score": r.relevance_score}
+            )
+        )
     return reranked
