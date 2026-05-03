@@ -15,7 +15,7 @@ MAX_TOKENS_PER_REQUEST = 320_000
 
 
 @cache
-def _get_client() -> voyageai.Client:
+def get_client() -> voyageai.Client:
     return voyageai.Client(api_key=settings.voyage_api_key or None)
 
 
@@ -61,7 +61,7 @@ def embed_chunks(chunks: list[Chunk], input_type: str = "document") -> list[list
         nonlocal batch_texts, batch_tokens
         if not batch_texts:
             return
-        result = _get_client().embed(batch_texts, model=settings.embedding_model, input_type=input_type)
+        result = get_client().embed(batch_texts, model=settings.embedding_model, input_type=input_type)
         embeddings.extend(result.embeddings)
         batch_texts = []
         batch_tokens = 0
@@ -87,7 +87,7 @@ def embed_query(text: str, *, input_type: str = "query") -> list[float]:
     not caught here — wrap with `map_voyage_errors()` (or use
     `embed_query_with_error_mapping`).
     """
-    result = _get_client().embed([text], model=settings.embedding_model, input_type=input_type)
+    result = get_client().embed([text], model=settings.embedding_model, input_type=input_type)
     return result.embeddings[0]
 
 
@@ -98,7 +98,7 @@ def embed_query_with_error_mapping(text: str) -> list[float]:
 
 
 def count_tokens(texts: list[str]) -> int:
-    return _get_client().count_tokens(texts, model=settings.embedding_model)
+    return get_client().count_tokens(texts, model=settings.embedding_model)
 
 
 def per_text_token_counts(texts: list[str]) -> list[int]:
@@ -114,4 +114,4 @@ def tokenize(texts: list[str]) -> list[Encoding]:
     (char_start, char_end) tuples per token). The chunker uses `.offsets`
     to slice text by token boundary when no semantic separator applies.
     """
-    return _get_client().tokenize(texts, model=settings.embedding_model)
+    return get_client().tokenize(texts, model=settings.embedding_model)

@@ -38,7 +38,7 @@ SYSTEM_PROMPT = (
 
 
 @cache
-def _get_client() -> anthropic.Anthropic:
+def get_client() -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=settings.anthropic_api_key or None)
 
 
@@ -95,7 +95,7 @@ def generate_answer(
     content: list[dict] = [build_search_result_block(c) for c in chunks]
     content.append({"type": "text", "text": question})
     with map_anthropic_errors():
-        return _get_client().messages.create(
+        return get_client().messages.create(
             model=CHAT_MODEL,
             max_tokens=CHAT_MAX_TOKENS,
             system=SYSTEM_PROMPT,
