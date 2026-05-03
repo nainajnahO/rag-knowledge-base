@@ -64,7 +64,7 @@ This is a working artifact — written for the reviewer and for ourselves.
 
 ## 3. Chunking strategy
 
-**Decision:** Recursive token-based splitting (paragraph → sentence → word → token-offset fallback) for both `/text` and `/document` endpoints. **600 tokens per chunk, 15% overlap (~90 tokens).** Token counting via Voyage's tokenizer, not characters.
+**Decision:** Token-based splitting via `semantic-text-splitter` for both `/text` and `/document` endpoints. **600 tokens per chunk, 15% overlap (~90 tokens).** Token counting via Voyage's tokenizer, not characters — the splitter receives a callback that routes through `app/embeddings.py:per_text_token_counts`, so chunk sizes match exactly what the embedding API will see.
 
 **Alternatives considered:**
 - Fixed character/token splits (rejected — cuts mid-word/sentence)
@@ -72,15 +72,15 @@ This is a working artifact — written for the reviewer and for ourselves.
 - Layout/structure-aware via `docling` (per-section/per-page metadata for PDFs — strong story but +half-day to the build)
 - Semantic chunking (extra embedding calls during ingestion; modest gains over recursive in recent benchmarks)
 - Hierarchical / parent-child (small chunks for retrieval, larger parents for LLM context — better quality, more complexity)
+- LangChain's `RecursiveCharacterTextSplitter` (configurable token-based via `length_function`, but heavier package surface and history of restructuring)
+- Custom recursive implementation (what this codebase originally shipped — see "Library vs. custom" below)
 
 **Why these specific numbers:**
-- Recursive splitting respects natural boundaries when possible while keeping chunk sizes predictable; LangChain-style splitter is well-understood, ~30 lines or one library call.
+- Library-driven splitting respects natural boundaries when possible while keeping chunk sizes predictable.
 - 600 tokens because Voyage embeddings are trained for general text in this range; memos/reports rarely have meaningful units shorter than ~150 tokens (paragraph) or longer than ~700 (a few paragraphs). 600 is the middle, keeping citations precise enough to spot-check.
 - 15% overlap because boundary-straddling sentences would otherwise be split across chunks and missed by retrieval; 0% loses content, 25%+ inflates results with near-duplicates.
 
-**Why custom code instead of `langchain-text-splitters`:** LangChain's `RecursiveCharacterTextSplitter` accepts a `length_function`, so it can be configured to be token-based. Honest tradeoff: ~60 lines of custom code vs. a small dependency. We chose custom to keep the chunking strategy fully visible in the codebase, avoid LangChain's package-restructuring history, and minimize dependency footprint. A swap is mechanical if multilingual or hierarchical chunking ever justifies the dependency.
-
-**Multilingual fallback (token-offset slicing).** The semantic separators (`\n\n`, `\n`, `. `, ` `) are Latin-script-biased — CJK languages without inter-word spaces, or any contiguous block, would otherwise survive recursion intact and either truncate at Voyage's 32K-token input cap or produce one oversize chunk per document. The deepest fallback (`_token_slice` in `app/chunking.py`) uses Voyage's tokenizer to read each token's `(char_start, char_end)` offset and slices the text into `OVERLAP_TOKENS`-sized pieces by character index. The packer then produces correctly-sized windows with overlap from those small pieces, exactly as it does for separator-derived pieces. Result: chunks are ≤ MAX_TOKENS in any language, overlap is preserved at chunk boundaries, the embedding never gets a >32K-token input. Not as semantically aligned as Latin-text chunking (boundaries can fall mid-word in any language; mid-sentence in CJK), but functionally correct everywhere.
+**Library vs. custom:** the original implementation was ~125 lines of hand-rolled recursive splitting with a token-offset fallback for non-Latin scripts. The case for custom rested on three points: visibility of the algorithm in-tree, one fewer dependency, and explicit handling of CJK / no-space scripts. Under scrutiny only the first holds up — `semantic-text-splitter` walks Unicode graphemes and packs them to a token capacity, so multilingual handling isn't a unique advantage of the custom code, and the dependency footprint is small (single Rust-backed wheel, no transitive surface). The library is more battle-tested for less code; the swap is the right call once the "I understand the algorithm" signal has been delivered elsewhere (PR history, this document).
 
 **Migration notes — recursive flat → parent-child (1 focused day if architecture is clean):**
 - Schema: add `parent_id` column on `chunks` referencing another row (or a separate `parent_chunks` table).
