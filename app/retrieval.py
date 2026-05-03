@@ -5,7 +5,7 @@ One function — `retrieve(conn, query, k, filters) -> list[RetrievedChunk]`.
 Endpoints don't write SQL; they call this. The route layer then applies a
 reranker (DECISIONS.md §7.2) over the candidate pool returned here.
 
-Shape mirrors pgvector's canonical RRF example
+Shape mirrors pgvector's reference RRF example
 (github.com/pgvector/pgvector-python/blob/master/examples/hybrid_search/rrf.py)
 and Supabase's `hybrid_search` RPC (supabase.com/docs/guides/ai/hybrid-search):
 two CTEs (one per lane) joined with FULL OUTER JOIN — a LEFT JOIN would
