@@ -492,7 +492,7 @@ One block per chunk for this PR. Splitting chunks into sentence-level blocks wou
 - **422** — Pydantic validation (free). Includes the 3M-character extracted-text cap on both `/text` and `/document` (see §17).
 - **413** — multipart file body exceeds the 25 MB cap on `POST /document` (see §17). Rejected at the door before extraction.
 - **400** — bad file/input (e.g., empty text, malformed PDF, missing `%PDF-` magic bytes) AND upstream rejection of the input (Voyage `InvalidRequestError`).
-- **401** — missing/bad API key (Step 8 — not yet wired).
+- **401** — missing/bad API key. Wired in Step 8 via `app/auth.py`'s `require_api_key` dependency, attached to every data-touching router in `app/main.py`. Same 401 + `WWW-Authenticate: Bearer` for missing header, wrong key, and unset-server-key — operators distinguish via deployment state, clients don't need to.
 - **429** — upstream rate limited (Voyage `RateLimitError`).
 - **500** — server misconfig (e.g., missing/invalid `VOYAGE_API_KEY` surfacing as Voyage `AuthenticationError`). Distinguished from 503 so operators don't mistake a config bug for a transient upstream issue.
 - **503** — upstream transient failure (generic `VoyageError`; Anthropic upstream errors in Step 6 will follow the same hierarchy).
@@ -539,11 +539,19 @@ No retries, no circuit breakers, no custom exception hierarchy.
 
 ## 14. API key auth (stretch goal)
 
-**Decision:** Single API key, FastAPI dependency injection.
+**Decision:** Single API key, FastAPI dependency injection. **Done in Step 8** — see `app/auth.py`.
+
+**Shape:**
+- Single bearer token compared against `settings.api_key` (env var `API_KEY`) using `secrets.compare_digest` for constant-time comparison.
+- Header: `Authorization: Bearer <key>`. Implemented via FastAPI's built-in `HTTPBearer(auto_error=False)` so the dependency owns the response shape (401 + `WWW-Authenticate: Bearer`) rather than letting FastAPI emit a 403.
+- Wired at router scope in `app/main.py` (`include_router(..., dependencies=[Depends(require_api_key)])`), applied to `/text`, `/document`, `/search`, and `/chat`. `/health` is registered directly on the FastAPI app so it stays unauthenticated — Kubernetes liveness probes, Docker `HEALTHCHECK` directives, and load-balancer health checks expect an unauthenticated 200.
+- Same 401 returned for missing-header, wrong-key, and unset-server-key paths — no info leak about which path failed.
+
+**Empty-key bypass guard.** `secrets.compare_digest("", "")` is True, so a configuration with `API_KEY=""` plus an `Authorization: Bearer ` request would otherwise authenticate. The dependency short-circuits with `if not expected` before calling `compare_digest`, returning 401 in that path.
 
 **Why:**
 - Brief lists it as stretch and says even a simple API key is enough.
-- ~5 lines: a dependency that reads `Authorization: Bearer <key>` and compares against env var `API_KEY`.
+- ~25 lines including the empty-key guard and comment justifying scope.
 - Cheap signal of production-awareness. Deserves the half-PR it costs.
 
 ---
@@ -578,7 +586,7 @@ PRs are sized to be individually reviewable. Each merges to `main` with a merge 
 5. **Step 5** — `GET /search`: vector similarity with metadata filters via JOIN. **Done.** k=10/max=50, no score threshold, AND-across-keys metadata filters, HNSW iterative scan with `strict_order` (§6.1), shared `RetrievedChunk` model with `/chat`. See PR for the full set of locked design choices.
 6. **Step 6** — `POST /chat`: retrieval + Sonnet 4.6 + structured citations + four guardrails. **Done.** Path B chosen during planning research after surfacing Anthropic's first-class Search Result content blocks (§8 rewrite). Response carries `answer` (display), `answer_blocks` (native Anthropic shape), and `sources` (all retrieved chunks with `cited` flag and verbatim `cited_text`). See PR for the full set of locked design choices.
 7. **Step 7** — Hybrid search + rerank: tsvector column + RRF query, plus Voyage `rerank-2.5` over the 50-candidate fused pool. **Done.** Replaced dense `/search` and `/chat` retrieval with hybrid+rerank. Dropped the cosine-threshold gate from `/chat` per §8 guardrail #3 — refusal is now structural (empty-retrieval) plus model-driven (system prompt). Schema, retrieval SQL, and `app/rerank.py` shape verified against pgvector and Supabase reference examples; rerank choice and the absent-threshold pattern verified against Anthropic's *Introducing Contextual Retrieval*.
-8. **Step 8** — API key auth dependency.
+8. **Step 8** — API key auth dependency. **Done.** `app/auth.py` exposes `require_api_key`, attached at router scope in `app/main.py` to `/text`, `/document`, `/search`, `/chat`. `/health` registered directly on the FastAPI app stays unauthenticated for liveness probes. `secrets.compare_digest` for constant-time comparison; explicit `if not expected` short-circuit guards the empty-key bypass (`compare_digest("", "")` is True). 401 + `WWW-Authenticate: Bearer` on every failure path with no detail leak distinguishing missing/wrong/unset.
 9. **Step 9** — Smoke tests (pytest).
 10. **Step 10** — README polish, sample documents demonstrating metadata filtering, curl/Postman collection, opening "deliberate cuts" issues.
 

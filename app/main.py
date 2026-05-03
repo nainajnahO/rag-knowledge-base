@@ -1,9 +1,10 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 from app import db
+from app.auth import require_api_key
 from app.middleware import MaxBodySizeMiddleware
 from app.routes.chat import router as chat_router
 from app.routes.document import router as document_router
@@ -25,10 +26,16 @@ app = FastAPI(title="RAG Knowledge Base", version="0.1.0", lifespan=lifespan)
 # reverse order, and we want too-big requests rejected before any other
 # middleware runs.
 app.add_middleware(MaxBodySizeMiddleware)
-app.include_router(text_router)
-app.include_router(document_router)
-app.include_router(search_router)
-app.include_router(chat_router)
+
+# /health is wired directly on `app` and stays unauthenticated so liveness
+# probes (Kubernetes, Docker HEALTHCHECK, load balancers) don't need to
+# carry the API key. Auth is router-scoped so the four endpoints that
+# touch user data, embeddings, or the LLM are protected.
+_protected = [Depends(require_api_key)]
+app.include_router(text_router, dependencies=_protected)
+app.include_router(document_router, dependencies=_protected)
+app.include_router(search_router, dependencies=_protected)
+app.include_router(chat_router, dependencies=_protected)
 
 
 @app.get("/health")

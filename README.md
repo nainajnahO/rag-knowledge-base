@@ -19,18 +19,24 @@ uv sync
 
 # 3. Create a .env file at the project root with:
 #      DATABASE_URL=postgresql://ahody:ahody@localhost:5432/ahody
+#      API_KEY=<any non-empty string>     # clients send Authorization: Bearer <API_KEY>
 #      VOYAGE_API_KEY=<your key>          # https://www.voyageai.com
 #      ANTHROPIC_API_KEY=<your key>       # https://console.anthropic.com (needed for /chat)
 
 # 4. Run the API
 uv run uvicorn app.main:app --reload
 
-# 5. Sanity-check
+# 5. Sanity-check (no auth — /health is unauthenticated for liveness probes)
 curl http://localhost:8000/health
 # → {"status":"ok"}
 
+# All other endpoints require: -H "Authorization: Bearer $API_KEY"
+# (DECISIONS.md §14). Missing or wrong key → 401.
+export API_KEY="<the value you put in .env>"
+
 # 6a. Ingest plain text
 curl -X POST http://localhost:8000/text \
+  -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "title": "Q3 Revenue Memo",
@@ -44,6 +50,7 @@ curl -X POST http://localhost:8000/text \
 # 6b. Ingest a PDF (multipart/form-data — title required, rest optional;
 #     the `metadata` slot is a JSON-encoded string per DECISIONS.md §17 / Step 4 Q1)
 curl -X POST http://localhost:8000/document \
+  -H "Authorization: Bearer $API_KEY" \
   -F "title=Ahody hiring brief" \
   -F "author=Ahody" \
   -F 'metadata={"type": "take-home"}' \
@@ -51,10 +58,12 @@ curl -X POST http://localhost:8000/document \
 # → {"document_id": "...", "n_chunks": 2}
 
 # 7. Search (top-k by hybrid retrieval + Voyage rerank; default k=10, max 50)
-curl 'http://localhost:8000/search?q=revenue%20growth'
+curl -H "Authorization: Bearer $API_KEY" \
+     'http://localhost:8000/search?q=revenue%20growth'
 
 # 7b. Search with metadata filters (AND across keys, single-value-per-key)
-curl 'http://localhost:8000/search?q=plans&author=Eng%20Leadership&meta.department=engineering&published_after=2026-01-01'
+curl -H "Authorization: Bearer $API_KEY" \
+     'http://localhost:8000/search?q=plans&author=Eng%20Leadership&meta.department=engineering&published_after=2026-01-01'
 # → {"results": [{"chunk_id": "...", "ordinal": 0, "document_id": "...",
 #                 "document_title": "...", "author": "...", "published_date": "...",
 #                 "metadata": {...}, "score": 0.57, "text": "..."}]}
@@ -65,6 +74,7 @@ curl 'http://localhost:8000/search?q=plans&author=Eng%20Leadership&meta.departme
 
 # 8. Chat — RAG with structured Anthropic citations
 curl -X POST http://localhost:8000/chat \
+  -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"question": "How much did revenue grow in Q3 2025?"}'
 # → {
