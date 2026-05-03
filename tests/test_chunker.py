@@ -20,14 +20,17 @@ def test_short_text_produces_single_chunk() -> None:
 
 
 @requires_voyage
-def test_long_text_chunks_have_contiguous_ordinals_and_size_cap() -> None:
-    # ~3000 tokens — well past MAX_TOKENS=600, so we expect multiple chunks.
-    paragraph = (
+def test_long_text_chunks_have_contiguous_ordinals_size_cap_and_overlap() -> None:
+    # Varied paragraphs (each carrying its own index) so an overlap
+    # assertion can't be satisfied trivially by identical content.
+    paragraphs = [
+        f"Paragraph {i} discusses topic-{i} in detail. "
         "Recursive splitting respects natural boundaries when possible while "
         "keeping chunk sizes predictable. The chunker prefers paragraph "
         "breaks, then sentences, then words, then a token-offset fallback. "
-    )
-    text = (paragraph + "\n\n") * 50
+        for i in range(50)
+    ]
+    text = "\n\n".join(paragraphs)
 
     chunks = chunk_text(text)
 
@@ -38,6 +41,18 @@ def test_long_text_chunks_have_contiguous_ordinals_and_size_cap() -> None:
             f"chunk {c.ordinal} has {c.token_count} tokens, exceeds cap {MAX_TOKENS}"
         )
         assert c.text.strip(), "chunks should not be empty after stripping"
+
+    # OVERLAP_TOKENS-sized tail of chunks[i] is carried into chunks[i+1] by
+    # `_pack_with_overlap`, so the start of chunks[i+1] must appear inside
+    # chunks[i]. Check the first 40 chars (less than one paragraph) — small
+    # enough to be a real overlap signal but large enough to avoid trivial
+    # punctuation-only matches.
+    for i in range(len(chunks) - 1):
+        head = chunks[i + 1].text[:40]
+        assert head in chunks[i].text, (
+            f"chunk {i + 1} doesn't share an opening with the end of chunk {i}: "
+            f"no overlap detected"
+        )
 
 
 @requires_voyage

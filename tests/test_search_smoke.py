@@ -6,6 +6,8 @@ and persistence correctly, and that hybrid retrieval + rerank surfaces the
 uploaded document at the top.
 """
 
+from uuid import uuid4
+
 from fastapi.testclient import TestClient
 
 from .conftest import requires_voyage
@@ -17,10 +19,13 @@ def test_upload_then_search_returns_uploaded_document(
     db_cleanup: None,
 ) -> None:
     # Distinctive proper noun + unusual phrasing so neither the dense nor
-    # lexical lane has to fight ambient corpus noise.
+    # lexical lane has to fight ambient corpus noise. uuid salt → unique
+    # SHA-256 per run, so /text always exercises chunk→embed→persist
+    # instead of short-circuiting through §12 dedupe on leftover rows.
     payload = {
         "title": "Zorbnak quarterly notes",
         "text": (
+            f"[run {uuid4()}] "
             "The Zorbnak fiscal review for Q3 2025 reports a 47% increase in "
             "thaumaturgical widget sales across the Belgrade office. The "
             "Zorbnak board attributes this to improved supply-chain "
