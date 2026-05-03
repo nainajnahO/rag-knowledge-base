@@ -2,9 +2,10 @@
 
 `rerank(query, candidates, top_k)` takes the RRF candidate pool from
 `app.retrieval.retrieve` and returns the top-k chunks reordered by Voyage's
-`relevance_score`. The score on each `RetrievedChunk` is updated in place
-with the rerank score; the upstream RRF score is not preserved (DECISIONS.md
-§8 specifies the rerank score as the single score returned to clients).
+`relevance_score`. Returned chunks are copies of the input candidates with
+the score field replaced by the rerank `relevance_score`; the upstream RRF
+score is not preserved (DECISIONS.md §8 specifies the rerank score as the
+single score returned to clients).
 
 Voyage SDK errors are translated via the same context manager used by the
 embedder (`map_voyage_errors`) so operators see one taxonomy across both
