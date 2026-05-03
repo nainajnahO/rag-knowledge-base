@@ -46,7 +46,7 @@ This is a working artifact — written for the reviewer and for ourselves.
 - 32K-token per-input context length is far above our 600-token chunks — no risk of truncation.
 
 **API usage notes (load-bearing for the embedder module):**
-- **Always pass `input_type`.** Voyage prepends a different internal prompt depending on whether the text is being embedded as a *document* (for indexing) or as a *query* (for retrieval). Skipping `input_type` works but produces weaker retrieval. The embedder module's signature is `embed_chunks(chunks, input_type="document") -> list[list[float]]`; ingestion calls it with the default, search/chat (Step 5/6) call it with `input_type="query"`. Embeddings produced with vs without `input_type` are still mutually compatible — this is purely a quality lever.
+- **Always pass `input_type`.** Voyage prepends a different internal prompt depending on whether the text is being embedded as a *document* (for indexing) or as a *query* (for retrieval). Skipping `input_type` works but produces weaker retrieval. The embedder module exposes two functions for the two call sites: `embed_chunks(chunks, input_type="document") -> list[list[float]]` for ingestion and `embed_query(text, *, input_type="query") -> list[float]` for search/chat retrieval. Both default to the correct `input_type` for their call site so callers don't have to remember. Embeddings produced with vs without `input_type` are still mutually compatible — this is purely a quality lever.
 - **Per-request caps for voyage-4:** ≤1,000 inputs AND ≤320,000 tokens per `/v1/embeddings` call. The embedder module owns sub-batching and enforces both ceilings simultaneously. With 600-token chunks, the token cap binds first at ~533 chunks per call; almost no real document hits either limit in one batch.
 - **`output_dtype="float"`** (the default) — full-precision 32-bit embeddings. Quantized variants (int8 / binary) save storage but lose recall; not worth the complexity at this scale.
 
@@ -72,7 +72,7 @@ This is a working artifact — written for the reviewer and for ourselves.
 - Layout/structure-aware via `docling` (per-section/per-page metadata for PDFs — strong story but +half-day to the build)
 - Semantic chunking (extra embedding calls during ingestion; modest gains over recursive in recent benchmarks)
 - Hierarchical / parent-child (small chunks for retrieval, larger parents for LLM context — better quality, more complexity)
-- LangChain's `RecursiveCharacterTextSplitter` (configurable token-based via `length_function`, but heavier package surface and history of restructuring)
+- LangChain's `RecursiveCharacterTextSplitter` (configurable token-based via `length_function`, but the LangChain text-splitter packages have a history of restructuring — splitting / renaming / re-homing classes — that's churn we'd inherit)
 - Custom recursive implementation (what this codebase originally shipped — see "Library vs. custom" below)
 
 **Why these specific numbers:**
@@ -80,7 +80,7 @@ This is a working artifact — written for the reviewer and for ourselves.
 - 600 tokens because Voyage embeddings are trained for general text in this range; memos/reports rarely have meaningful units shorter than ~150 tokens (paragraph) or longer than ~700 (a few paragraphs). 600 is the middle, keeping citations precise enough to spot-check.
 - 15% overlap because boundary-straddling sentences would otherwise be split across chunks and missed by retrieval; 0% loses content, 25%+ inflates results with near-duplicates.
 
-**Library vs. custom:** the original implementation was ~125 lines of hand-rolled recursive splitting with a token-offset fallback for non-Latin scripts. The case for custom rested on three points: visibility of the algorithm in-tree, one fewer dependency, and explicit handling of CJK / no-space scripts. Under scrutiny only the first holds up — `semantic-text-splitter` walks Unicode graphemes and packs them to a token capacity, so multilingual handling isn't a unique advantage of the custom code, and the dependency footprint is small (single Rust-backed wheel, no transitive surface). The library is more battle-tested for less code; the swap is the right call once the "I understand the algorithm" signal has been delivered elsewhere (PR history, this document).
+**Library vs. custom:** the original implementation was ~125 lines of hand-rolled recursive splitting with a token-offset fallback for non-Latin scripts. The case for custom rested on two points: visibility of the algorithm in-tree, and explicit handling of CJK / no-space scripts. Under scrutiny only the first holds up — `semantic-text-splitter` walks Unicode graphemes and packs them to a token capacity, so multilingual handling isn't a unique advantage of the custom code. The library is more battle-tested for less code; the swap is the right call once the "I understand the algorithm" signal has been delivered elsewhere (PR history, this document).
 
 **Migration notes — flat → parent-child (1 focused day if architecture is clean):**
 - Schema: add `parent_id` column on `chunks` referencing another row (or a separate `parent_chunks` table).
@@ -89,8 +89,8 @@ This is a working artifact — written for the reviewer and for ourselves.
 - Citations: cite the *child* (precise quote), pass the *parent* (rich context) to the LLM. Prompt + response shape gain one field.
 - Re-ingest all documents (cents at this scale).
 - **Design implication for now (already baked into the plan):**
-  1. Chunker is its own module with signature `chunk(text, metadata) -> list[Chunk]`. Endpoints don't know how splitting works.
-  2. Retrieval is its own module with signature `retrieve(query, k, filters) -> list[RetrievedChunk]`. Endpoints don't write SQL.
+  1. Chunker is its own module with signature `chunk_text(text: str) -> list[Chunk]`. Endpoints don't know how splitting works. Adding a `metadata` parameter for parent-child is a local change to this signature.
+  2. Retrieval is its own module with signature `retrieve(conn: Connection, query: str, k: int, filters: Filters) -> list[RetrievedChunk]`. Endpoints don't write SQL.
   3. `Chunk` is a Pydantic model. Adding `parent_id: UUID | None = None` later is one line.
 
 **Migration notes — plain-text → structure-aware PDF via `docling` (~half-day):**
@@ -168,7 +168,7 @@ The `tsv` column and its GIN index land in Step 7 (§7) — `tsvector GENERATED 
 **Alternatives considered:**
 - `pypdf` (BSD-style, pure Python, lower text quality)
 - `pdfplumber` (table-aware, slower, prose quality similar to pypdf)
-- `docling` (structure-aware, ML models, hundreds of MB — overkill for the plain-text-only path we picked)
+- `docling` (structure-aware via ML-based layout parsing — overkill for the plain-text-only path we picked, and §5 isn't where the structure-aware decision belongs anyway; deferred to §15 / [#26](https://github.com/nainajnahO/rag-knowledge-base/issues/26))
 - `unstructured` (older structure-aware option; superseded by docling)
 
 **Why this choice:**
@@ -176,7 +176,7 @@ The `tsv` column and its GIN index land in Step 7 (§7) — `tsvector GENERATED 
 - We're not using structure (deferred to README's "next steps") so a heavier structure-aware library would be paying for capability we don't use.
 
 **Trade-off — AGPL license:**
-PyMuPDF is dual-licensed: AGPL by default, with a commercial license available from Artifex. Strict reading of AGPL would require source disclosure for a commercial network-deployed RAG service. **README will explicitly call this out** along with the path to swap for pypdf — extraction is one module, ~30 lines, same-day swap.
+PyMuPDF is dual-licensed: AGPL by default, with a commercial license available from Artifex. Strict reading of AGPL would require source disclosure for a commercial network-deployed RAG service. **README will explicitly call this out** along with the path to swap for pypdf — extraction is one module, ~50 lines, same-day swap.
 
 **Migration notes — pymupdf → docling (for structure-aware chunking, ~half-day):**
 - Replace extraction module body.
@@ -461,7 +461,7 @@ One block per chunk for this PR. Splitting chunks into sentence-level blocks wou
 
 ## 10. /chat shape — single-turn
 
-**Decision:** Single-turn / stateless. Request: `{question}`. Response: `{answer, sources}`.
+**Decision:** Single-turn / stateless. Request: `{question}`. Response: `{answer, answer_blocks, sources, stop_reason}` (full shape in §8).
 
 **Alternatives considered:**
 - Multi-turn with client-managed message history (adds query-rewriting complexity)
@@ -523,9 +523,9 @@ No retries, no circuit breakers, no custom exception hierarchy.
 
 ## 13. Tests
 
-**Decision:** Three pytest smoke tests covering the load-bearing seams. As shipped: ~240 lines across `tests/conftest.py` and three test files.
+**Decision:** Three pytest smoke tests (test 1 covers four cases — short, long-with-overlap, empty, and a no-separator edge case for CJK and giant contiguous blocks) covering the load-bearing seams. As shipped: ~260 lines across `tests/conftest.py` and three test files.
 
-1. **Chunker sanity** — short text yields one chunk; long text yields contiguous-ordinal chunks under `MAX_TOKENS` with observable overlap (the start of `chunks[i+1]` appears inside `chunks[i]`); empty text yields none.
+1. **Chunker sanity** — short text yields one chunk; long text yields contiguous-ordinal chunks under `MAX_TOKENS` with observable overlap (the start of `chunks[i+1]` appears inside `chunks[i]`); empty text yields none; no-separator text (CJK without inter-word spaces, or a giant contiguous Latin block) still respects the token cap — the case the old custom chunker needed a `_token_slice` fallback for.
 2. **Upload → search smoke** — POST /text, then GET /search; the just-uploaded document is at the top of the results.
 3. **Citation-source consistency** — POST /chat, assert every citation in `answer_blocks[*].citations` resolves to a `chunk_id` present in `sources`, and each `cited_text` is a verbatim substring of the corresponding source chunk's `text`. (Updated from an earlier `[N]`-style sketch when §8 moved to Anthropic's structured citations.) Empty-citations responses are gated on `body["answer"] == REFUSAL_TEXT` — anything else is a real regression worth catching.
 
@@ -560,7 +560,7 @@ Each cut is filed as a GitHub Issue and surfaced in the README's "What I left ou
 | Cut | Why deferred | Effort to add later | Issue |
 |---|---|---|---|
 | **Multi-turn /chat with query rewriting** | Real complexity is in the query rewriter, not the API. Brief asks for single-turn. | ~1 day | [#25](https://github.com/nainajnahO/rag-knowledge-base/issues/25) |
-| **Structure-aware PDF chunking via docling** | Chose plain-text token-based chunking as the baseline. docling adds ML model deps. | ~half-day | [#26](https://github.com/nainajnahO/rag-knowledge-base/issues/26) |
+| **Structure-aware PDF chunking via docling** | Chose plain-text token-based chunking as the baseline; structure-aware is the next quality lever, not the baseline. | ~half-day | [#26](https://github.com/nainajnahO/rag-knowledge-base/issues/26) |
 | **Parent-child / hierarchical chunking** | Real retrieval-quality win, but complicates retrieval and chat. Architecture is designed to make it cheap. | ~1 day | [#27](https://github.com/nainajnahO/rag-knowledge-base/issues/27) |
 | **voyage-context-3 contextual embeddings** | Same dimension as voyage-4 → cheap migration. Better story to ship the standard voyage-4 model first; document-grouped batching adds complexity worth deferring. | ~half-day | [#28](https://github.com/nainajnahO/rag-knowledge-base/issues/28) |
 | **Streaming responses on /chat** | Brief lists it as stretch. Demo is via curl; streaming complicates citation parsing for the reviewer. | ~few hours | _not filed — defer beyond §15 issue set_ |
@@ -618,7 +618,7 @@ PRs are sized to be individually reviewable. Each merges to `main` with a merge 
 **Implementation:**
 
 - **File-size cap.** Enforced via FastAPI middleware that reads the `Content-Length` header before the multipart body is parsed. Reject early with 413 — never reads the body bytes. (For requests without `Content-Length`, fall back to a streaming-byte counter that aborts at 25 MB.) Middleware is **global** (applies to every endpoint), not path-scoped to `/document`. Free for the other endpoints — `/text` is already bounded by the 3M-char cap (≤ ~12 MB UTF-8 worst case) and `/chat` request bodies are tiny — and avoids a per-path branch in the middleware.
-- **Text-length cap.** `/text` enforces it via the reusable type alias `MaxText = Annotated[str, Field(min_length=1, max_length=MAX_TEXT_CHARS)]` in `app/limits.py` (`IngestTextRequest.text: MaxText` replaces today's inline `Field(max_length=3_000_000)`). `/document` enforces the same constant page-by-page inside `app/extraction.py`: `extract_text` walks pages, tracks a running character total (including the 2-char `"\n\n"` joins), and raises `TextTooLargeError` the moment it crosses `MAX_TEXT_CHARS`. The route catches that and returns 422 — same status code, same constant, no shared validator. Two enforcement sites for two genuinely different shapes (Pydantic-validated request body vs. a streaming extraction loop), one shared constant. Empty extraction is caught **after** the text-length cap (it can't fire if extraction was capped first) and raised as **400** (mirroring `/text`'s post-strip check at `app/routes/text.py:19-20`), so §11's 400 entry remains authoritative for empty-text errors.
+- **Text-length cap.** `/text` enforces it via the reusable type alias `MaxText = Annotated[str, Field(min_length=1, max_length=MAX_TEXT_CHARS)]` in `app/limits.py` (`IngestTextRequest.text: MaxText` replaces today's inline `Field(max_length=3_000_000)`). `/document` enforces the same constant page-by-page inside `app/extraction.py`: `extract_text` walks pages, tracks a running character total (including the 2-char `"\n\n"` joins), and raises `TextTooLargeError` the moment it crosses `MAX_TEXT_CHARS`. The route catches that and returns 422 — same status code, same constant, no shared validator. Two enforcement sites for two genuinely different shapes (Pydantic-validated request body vs. a streaming extraction loop), one shared constant. Empty extraction is caught **after** the text-length cap (it can't fire if extraction was capped first) and raised as **400** (mirroring `/text`'s post-strip check at `app/routes/text.py:20-22`), so §11's 400 entry remains authoritative for empty-text errors.
 - **Error shape.** Both errors use FastAPI's default `{"detail": "..."}` per §11 — no wrapping, no custom hierarchy.
 - **Where the constants live.** `MAX_UPLOAD_BYTES = 25 * 1024 * 1024`, `MAX_TEXT_CHARS = 3_000_000`, and the `MaxText` type alias all live as module-level definitions in `app/limits.py`. Middleware imports `MAX_UPLOAD_BYTES`; `IngestTextRequest` imports `MaxText`; `app/extraction.py` imports `MAX_TEXT_CHARS` directly for its page-by-page running-total check. Not surfaced through `Settings` / env vars — these are tied to embedding economics and worker memory, not per-deployment knobs.
 
