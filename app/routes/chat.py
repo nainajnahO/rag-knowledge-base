@@ -1,4 +1,4 @@
-"""POST /chat — RAG with structured Anthropic citations (DECISIONS.md §8 Path B)."""
+"""POST /chat — hybrid RAG + rerank + structured Anthropic citations (DECISIONS.md §7 / §7.2 / §8)."""
 
 import anthropic
 from fastapi import APIRouter
@@ -13,18 +13,13 @@ from app.models import (
     CitationRef,
     RetrievedChunk,
 )
-from app.retrieval import Filters, retrieve
+from app.rerank import rerank
+from app.retrieval import RRF_CANDIDATES_PER_LANE, Filters, retrieve
 
 router = APIRouter()
 
 # DECISIONS.md §8 — top-K retrieval for chat.
 CHAT_TOP_K = 8
-
-# DECISIONS.md §8 guardrail #3 — score threshold gate. Top retrieved chunk
-# below this cosine similarity → refuse without calling Anthropic. Lives
-# here (not in app/llm.py) because it's a route-level decision: whether
-# to call the LLM at all.
-CHAT_SCORE_THRESHOLD = 0.5
 
 
 class ChatRequest(BaseModel):
@@ -41,14 +36,16 @@ class ChatRequest(BaseModel):
 
 @router.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, conn: ConnDep) -> ChatResponse:
-    chunks = retrieve(conn, req.question, k=CHAT_TOP_K, filters=Filters())
+    candidates = retrieve(conn, req.question, k=RRF_CANDIDATES_PER_LANE, filters=Filters())
+    chunks = rerank(req.question, candidates, top_k=CHAT_TOP_K)
 
-    # Compute top_score rather than reading chunks[0].score so the gate
-    # doesn't silently depend on retrieve()'s ordering. Step 7 (hybrid/RRF)
-    # is the planned rewrite of retrieve()'s SQL body and may not preserve
-    # raw-score ordering; max() makes the gate immune to that.
-    top_score = max((c.score for c in chunks), default=0.0)
-    if top_score < CHAT_SCORE_THRESHOLD:
+    # Refusal is owned by the system prompt + Claude's citation behavior
+    # (DECISIONS.md §8): we don't pre-filter on a score threshold. The only
+    # structural guard is "retrieval returned nothing" — no candidates means
+    # there's nothing to send to the LLM. This pattern matches Anthropic's
+    # contextual-retrieval blog, the pgvector RRF example, and Supabase's
+    # hybrid_search RPC, none of which apply a rerank-score cutoff.
+    if not chunks:
         return _refusal_response()
 
     message = generate_answer(req.question, chunks)
