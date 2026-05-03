@@ -12,7 +12,7 @@ embedder (`map_voyage_errors`) so operators see one taxonomy across both
 upstream calls (DECISIONS.md §11).
 """
 
-from app.embeddings import _get_client, map_voyage_errors
+from app.embeddings import get_client, map_voyage_errors
 from app.models import RetrievedChunk
 
 # DECISIONS.md §7.2 — Voyage's recommended general-purpose reranker, 32K
@@ -31,7 +31,7 @@ def rerank(
 
     documents = [c.text for c in candidates]
     with map_voyage_errors():
-        result = _get_client().rerank(
+        result = get_client().rerank(
             query=query,
             documents=documents,
             model=RERANK_MODEL,
