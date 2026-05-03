@@ -322,6 +322,8 @@ The `tsvector` column needs a Postgres text-search config that governs tokenizat
 
 **Migration notes:** Model alias is in one constant (`RERANK_MODEL` in `app/rerank.py`). Swap to a Cohere reranker by replacing the body of `rerank()` and adding a `map_cohere_errors` context manager mirroring §11; signature stays the same.
 
+**Token-budget interaction (load-bearing for future migrations).** Rerank-2.5 has a 32K-token combined input budget (query + all candidate documents). With §3's 600-token chunks and `RRF_CANDIDATES_PER_LANE = 50` from §7, the worst case is ~30,000 token-document budget plus query — under the cap with ~2K margin. The budget depends on three independent config values that aren't linked in code: chunk size (§3), candidate-pool size (§7), and reranker context (this section's `RERANK_MODEL`). Bumping any one can silently exceed it; Voyage's SDK defaults `truncation=True` so overflow degrades quality silently rather than raising. Whoever migrates §3 to parent-child chunking with larger parent chunks, or §7 to a bigger candidate pool, needs to either (a) verify the budget still holds, (b) sub-batch the rerank call analogous to `app/embeddings.py:embed_chunks`'s per-request cap discipline, or (c) explicitly opt into truncation as a documented quality trade-off. No runtime guard is in place today — same posture as §6.1's "Validation gap" note: make the precondition legible, don't enforce it at this scale.
+
 ---
 
 ## 8. Citation approach (the load-bearing one)
