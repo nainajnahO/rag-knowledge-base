@@ -4,7 +4,7 @@ A small retrieval-augmented-generation (RAG) backend: upload documents (plain te
 
 Design decisions and the alternatives considered are documented in [`DECISIONS.md`](./DECISIONS.md).
 
-> **Status:** scaffolding in place; feature endpoints land PR-by-PR. See the build sequence in DECISIONS.md §16.
+> **Status:** all endpoints live; smoke tests in place. Build sequence (DECISIONS.md §16) is on Step 10 — README polish, sample documents, Postman collection.
 
 ---
 
@@ -63,7 +63,10 @@ curl 'http://localhost:8000/search?q=plans&author=Eng%20Leadership&meta.departme
 # compare scores from different requests or threshold on a fixed value —
 # rank order within a single response is the meaningful signal.
 
-# 8. Chat — RAG with structured Anthropic citations
+# 8. Run the smoke tests (3 tests, ~5 seconds; needs both API keys + Postgres up)
+uv run pytest -q
+
+# 9. Chat — RAG with structured Anthropic citations
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"question": "How much did revenue grow in Q3 2025?"}'
@@ -110,14 +113,14 @@ The full record of decisions, alternatives considered, and migration paths is in
 |---|---|---|
 | **Stack** | Python 3.14 + FastAPI + Pydantic v2 + `uv`. Postgres 16 + pgvector via Docker Compose. | RAG tooling is Python-first. pgvector handles 100k+ chunks comfortably and gives one DB for documents, chunks, embeddings, metadata, *and* lexical ranking — no two-store sync problem. ([§1](./DECISIONS.md#1-stack)) |
 | **Embeddings** | Voyage `voyage-4`, 1024-dim, cosine via pgvector's `<=>`. | Voyage is Anthropic's recommended embedding partner. `voyage-4` is the labelled general-purpose default — using the recommended default is a stronger story than picking the biggest tier without benchmarks. ([§2](./DECISIONS.md#2-embedding-model)) |
-| **Chunking** | Recursive token-based: paragraph → sentence → word → token-offset fallback. 600 tokens / 15% overlap. | Respects natural boundaries when possible, predictable sizes always. The token-offset fallback keeps it correct in CJK / no-space scripts where Latin separators don't apply. ([§3](./DECISIONS.md#3-chunking-strategy)) |
+| **Chunking** | Token-based via `semantic-text-splitter`, sized with Voyage's HuggingFace tokenizer. 600 tokens / 15% overlap. | Library walks Unicode graphemes and packs to a token capacity, so chunks stay correctly sized in any script (CJK, Arabic, contiguous blocks) without a Latin-separator fallback. Token counts match what the embedding API will see. ([§3](./DECISIONS.md#3-chunking-strategy)) |
 | **Schema** | Hybrid: typed columns for `title` / `author` / `published_date` + JSONB `metadata` with GIN. | Validated SQL filters where it matters, flexibility everywhere else. One row per document, one row per chunk; `documents.content_hash UNIQUE` for dedupe. ([§4](./DECISIONS.md#4-metadata-schema)) |
 | **Vector index** | HNSW, defaults `m=16, ef_construction=64`, cosine ops. | Production default in pgvector ≥0.5; best recall/speed tradeoff. IVFFlat has no advantage for new projects in 2026. ([§6](./DECISIONS.md#6-vector-index)) |
 | **Hybrid search + rerank** | RRF (`k=60`, 50 candidates per lane, `FULL OUTER JOIN`, `ts_rank_cd`, `'simple'` tsv config) → Voyage `rerank-2.5` → top-K. | RRF is parameter-free and no score normalization is needed; SQL shape mirrors pgvector's and Supabase's reference examples. Reranker is the natural drop-in given Voyage is Anthropic's recommended embedding partner — same SDK, same error hierarchy. ([§7](./DECISIONS.md#7-hybrid-search-fusion) / [§7.2](./DECISIONS.md#72-reranker--voyage-rerank-25)) |
-| **Citations** | Numbered inline (`[1]`, `[2]`); response includes every retrieved chunk with text + score + metadata. | The brief grades whether claims are *verifiable in seconds*. Returning all retrieved chunks (not just cited ones) lets the reviewer see what the model had access to. (Step 6 — [§8](./DECISIONS.md#8-citation-approach-the-load-bearing-one)) |
+| **Citations** | Anthropic's structured citations (`search_result_location` blocks). Each claim carries a verbatim `cited_text` quote tied to a specific retrieved chunk; the response also includes every retrieved chunk with a `cited` flag and any `cited_text` quotes. | The brief grades whether claims are *verifiable in seconds*. The model emits citations as a first-class API field (no `[N]` parsing); returning all retrieved chunks (not just cited ones) lets the reviewer see what the model had access to. ([§8](./DECISIONS.md#8-citation-approach-the-load-bearing-one)) |
 | **Chat LLM** | Claude Sonnet 4.6, single-turn. | Production default for grounded RAG. Single-turn matches the brief literally; multi-turn opens a query-rewriting subproblem deferred to a follow-up. ([§9](./DECISIONS.md#9-chat-llm) / [§10](./DECISIONS.md#10-chat-shape--single-turn)) |
 
-The biggest *deliberate* cuts (multi-turn chat, structure-aware PDF chunking, parent-child chunking, contextual embeddings, cross-encoder re-ranking, knowledge graphs) are listed in [`DECISIONS.md §15`](./DECISIONS.md#15-deliberate-cuts-and-why) with effort estimates for adding each later.
+The biggest *deliberate* cuts (multi-turn chat with query rewriting, structure-aware PDF chunking, parent-child chunking, contextual embeddings, streaming `/chat`, API key auth, knowledge graphs) are listed in [`DECISIONS.md §15`](./DECISIONS.md#15-deliberate-cuts-and-why) with effort estimates for adding each later. Each cut is filed as a GitHub Issue ([#3](https://github.com/nainajnahO/rag-knowledge-base/issues/3), [#25](https://github.com/nainajnahO/rag-knowledge-base/issues/25)–[#30](https://github.com/nainajnahO/rag-knowledge-base/issues/30)).
 
 ---
 
@@ -145,7 +148,24 @@ docker compose down -v && docker compose up -d
 | GET    | `/search`   | live       |
 | POST   | `/chat`     | live       |
 
-> Curl examples and a Postman collection land alongside the endpoints.
+> Curl examples for every endpoint are in [How to run](#how-to-run) above. A Postman collection ships in Step 10.
+
+---
+
+## Tests
+
+Three pytest smoke tests covering the load-bearing seams:
+
+1. **Chunker sanity** (`tests/test_chunker.py`) — short text yields one chunk; long text yields contiguous-ordinal chunks under `MAX_TOKENS` with observable overlap; empty text yields none.
+2. **Upload → search smoke** (`tests/test_search_smoke.py`) — `POST /text` then `GET /search` returns the just-uploaded document at the top.
+3. **Citation consistency** (`tests/test_chat_citations.py`) — every citation in `answer_blocks[*].citations` resolves to a `chunk_id` in `sources`, and each `cited_text` is a verbatim substring of the source chunk.
+
+```bash
+uv run pytest -q
+# → 5 passed in ~5s
+```
+
+Tests hit the real dev Postgres (per docker-compose) and the real Voyage / Anthropic upstreams. Tests that need an upstream key skip cleanly when the key is unset. Per-test cleanup is via a `db_cleanup` fixture; upload payloads are uuid-salted so each run exercises the chunk→embed→persist path rather than short-circuiting through SHA-256 dedupe. Rationale and the "three tests, not more" framing in [`DECISIONS.md §13`](./DECISIONS.md#13-tests).
 
 ---
 
@@ -188,9 +208,9 @@ The following review skills are **slash-commands I (the user) wrote myself** and
 
 - **`/native-check`** — looks for hand-rolled code that duplicates language/standard-library/framework features. On the route, it caught the manual `global _client` sentinel pattern and recommended `@functools.cache` ([PR #9](https://github.com/nainajnahO/rag-knowledge-base/pull/9)). Also caught the older `Depends()`-as-default-value pattern and recommended migrating to `Annotated[]` style ([PR #11](https://github.com/nainajnahO/rag-knowledge-base/pull/11)).
 
-- **`/dry-check`** — checks for shared types and data-driven rendering. Run on the current codebase: clean. Logged here for honesty.
+- **`/dry-check`** — checks for shared types and data-driven rendering. Run on the current codebase: no findings. Logged for honesty rather than omitted.
 
-- **`/architecture-check`** — audits architectural overkill. Run before Step 4 to check whether the in-progress design is right-sized for take-home scale.
+- **`/architecture-check`** — audits architectural overkill. Run before Step 4 to confirm the in-progress design is right-sized for take-home scale.
 
 These skills are themselves the most concrete signal of how I work with Claude: I don't trust a single pass of its review; I run independent checks I authored, and I act on what they find.
 
@@ -198,7 +218,7 @@ These skills are themselves the most concrete signal of how I work with Claude: 
 
 ## What I left out and why
 
-> See [`DECISIONS.md`](./DECISIONS.md) §15 — table of deliberate cuts with effort estimates for adding each later. Each cut is also a GitHub Issue.
+> See [`DECISIONS.md §15`](./DECISIONS.md#15-deliberate-cuts-and-why) — table of deliberate cuts with effort estimates for adding each later. Each cut is filed as a GitHub Issue: [#3](https://github.com/nainajnahO/rag-knowledge-base/issues/3) (multi-language), [#25](https://github.com/nainajnahO/rag-knowledge-base/issues/25) (multi-turn chat), [#26](https://github.com/nainajnahO/rag-knowledge-base/issues/26) (docling), [#27](https://github.com/nainajnahO/rag-knowledge-base/issues/27) (parent-child chunking), [#28](https://github.com/nainajnahO/rag-knowledge-base/issues/28) (voyage-context-3), [#29](https://github.com/nainajnahO/rag-knowledge-base/issues/29) (API key auth), [#30](https://github.com/nainajnahO/rag-knowledge-base/issues/30) (knowledge graph).
 
 ---
 
@@ -206,7 +226,7 @@ These skills are themselves the most concrete signal of how I work with Claude: 
 
 Honest list of what's true *right now*. See [`DECISIONS.md §15`](./DECISIONS.md#15-deliberate-cuts-and-why) for the full table of deliberate cuts with effort estimates for each.
 
-- **DB connection is held during upstream LLM/embedding calls.** Each request borrows a pooled connection via `Depends(get_conn)` for its full lifetime. Affects every endpoint that calls an upstream: `/text` and `/document` each make 1 Voyage embed call, `/search` makes 2 (Voyage embed + Voyage rerank), and `/chat` makes 3 sequential calls (Voyage embed + Voyage rerank + Anthropic). Pool size is 1–10. Under any meaningful concurrency this would exhaust the pool, and Step 7's rerank stage stretched the worst-case time-per-held-connection longer than what [PR #7](https://github.com/nainajnahO/rag-knowledge-base/pull/7) originally flagged. Not addressed at take-home scale. The fix (release-before-upstream + reacquire-after) is a focused half-day.
+- **DB connection is held during upstream LLM/embedding calls.** Each request borrows a pooled connection via `Depends(get_conn)` for its full lifetime, including across upstream calls (`/chat` makes 3 sequential ones). Pool is 1–10, so this would exhaust under meaningful concurrency. Not addressed at take-home scale; release-before-upstream + reacquire-after is a focused half-day. ([PR #7](https://github.com/nainajnahO/rag-knowledge-base/pull/7))
 - **HNSW is approximate.** Recall is typically >95%, not 100%. A query depending on a single rare chunk could miss it. Mitigation if ever needed: `SET LOCAL hnsw.ef_search = 100` per query — trades ~1ms latency for higher recall. ([§6](./DECISIONS.md#6-vector-index))
 - **Lexical lane uses `'simple'` config.** Language-neutral — keeps non-English content from being mis-stemmed by an English-specific config, but skips per-language morphology lift. Tracked in [issue #3](https://github.com/nainajnahO/rag-knowledge-base/issues/3); rationale in [§7](./DECISIONS.md#7-hybrid-search-fusion) (sub-section 7.1).
 - **PyMuPDF is AGPL.** PDF extraction (`POST /document`) uses `pymupdf` for plain-text quality. Strict reading of AGPL would require source disclosure for a commercial network-deployed RAG service. Migration path to `pypdf` is one module, ~30 lines, same-day swap. ([§5](./DECISIONS.md#5-pdf-extraction))

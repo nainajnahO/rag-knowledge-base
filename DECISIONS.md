@@ -64,7 +64,7 @@ This is a working artifact — written for the reviewer and for ourselves.
 
 ## 3. Chunking strategy
 
-**Decision:** Token-based splitting via `semantic-text-splitter` for both `/text` and `/document` endpoints. **600 tokens per chunk, 15% overlap (~90 tokens).** Token counting via Voyage's tokenizer, not characters — the splitter receives a callback that routes through `app/embeddings.py:per_text_token_counts`, so chunk sizes match exactly what the embedding API will see.
+**Decision:** Token-based splitting via `semantic-text-splitter` for both `/text` and `/document` endpoints. **600 tokens per chunk, 15% overlap (~90 tokens).** Token counting via Voyage's tokenizer, not characters — the splitter is constructed via `TextSplitter.from_huggingface_tokenizer` from Voyage's HuggingFace tokenizer (`get_client().tokenizer(model)` in `app/embeddings.py`), so the Rust splitter walks the same tokenizer the embedding API uses and chunk sizes match exactly what gets sent at embed time.
 
 **Alternatives considered:**
 - Fixed character/token splits (rejected — cuts mid-word/sentence)
@@ -82,7 +82,7 @@ This is a working artifact — written for the reviewer and for ourselves.
 
 **Library vs. custom:** the original implementation was ~125 lines of hand-rolled recursive splitting with a token-offset fallback for non-Latin scripts. The case for custom rested on three points: visibility of the algorithm in-tree, one fewer dependency, and explicit handling of CJK / no-space scripts. Under scrutiny only the first holds up — `semantic-text-splitter` walks Unicode graphemes and packs them to a token capacity, so multilingual handling isn't a unique advantage of the custom code, and the dependency footprint is small (single Rust-backed wheel, no transitive surface). The library is more battle-tested for less code; the swap is the right call once the "I understand the algorithm" signal has been delivered elsewhere (PR history, this document).
 
-**Migration notes — recursive flat → parent-child (1 focused day if architecture is clean):**
+**Migration notes — flat → parent-child (1 focused day if architecture is clean):**
 - Schema: add `parent_id` column on `chunks` referencing another row (or a separate `parent_chunks` table).
 - Chunker module: emit two-level output (parents + children with linkage).
 - Retrieval: search hits children, JOIN to parents, DISTINCT to avoid duplicate parent text in LLM context.
@@ -93,7 +93,7 @@ This is a working artifact — written for the reviewer and for ourselves.
   2. Retrieval is its own module with signature `retrieve(query, k, filters) -> list[RetrievedChunk]`. Endpoints don't write SQL.
   3. `Chunk` is a Pydantic model. Adding `parent_id: UUID | None = None` later is one line.
 
-**Migration notes — recursive → structure-aware PDF via `docling` (~half-day):**
+**Migration notes — plain-text → structure-aware PDF via `docling` (~half-day):**
 - Replace pymupdf extraction with docling for `POST /document` only.
 - Docling returns Markdown with hierarchy preserved → richer per-chunk metadata (section, page).
 - Chunker signature stays the same.
@@ -471,8 +471,7 @@ One block per chunk for this PR. Splitting chunks into sentence-level blocks wou
 - The brief literally says *"POST /chat takes a question."* Single-turn matches the spec.
 - Multi-turn opens a real RAG design problem — query rewriting for follow-up retrieval (the latest user turn alone has no semantic content to retrieve on; the full conversation pollutes embeddings; the right move is an LLM call to rewrite the latest turn into a standalone query before embedding). Doing this badly is worse than not doing it.
 
-**README will document the multi-turn upgrade path explicitly:**
-> Multi-turn /chat is a natural next step. The non-trivial part isn't the API shape — it's query rewriting for retrieval. The intended approach: client passes the conversation as `messages`, the server uses the LLM to rewrite the latest turn into a standalone search query (informed by history), then retrieves on the rewritten query, then answers with the original conversation in the LLM's context. Defers cleanly into a follow-up PR.
+**Multi-turn upgrade path** — tracked in [issue #25](https://github.com/nainajnahO/rag-knowledge-base/issues/25). Sketch: client passes the conversation as `messages`, the server uses the LLM to rewrite the latest turn into a standalone search query (informed by history), then retrieves on the rewritten query, then answers with the original conversation in the LLM's context. The non-trivial part isn't the API shape — it's the query rewriter. Defers cleanly into a follow-up PR.
 
 ---
 
@@ -492,7 +491,7 @@ One block per chunk for this PR. Splitting chunks into sentence-level blocks wou
 - **422** — Pydantic validation (free). Includes the 3M-character extracted-text cap on both `/text` and `/document` (see §17).
 - **413** — multipart file body exceeds the 25 MB cap on `POST /document` (see §17). Rejected at the door before extraction.
 - **400** — bad file/input (e.g., empty text, malformed PDF, missing `%PDF-` magic bytes) AND upstream rejection of the input (Voyage `InvalidRequestError`).
-- **401** — missing/bad API key (Step 8 — not yet wired).
+- **401** — missing/bad API key. The dependency is **not wired** today (Step 8 skipped — see §14, §15, [issue #29](https://github.com/nainajnahO/rag-knowledge-base/issues/29)). The status code remains in this taxonomy as the shape that would ship if relevance changed.
 - **429** — upstream rate limited (Voyage `RateLimitError`).
 - **500** — server misconfig (e.g., missing/invalid `VOYAGE_API_KEY` surfacing as Voyage `AuthenticationError`). Distinguished from 503 so operators don't mistake a config bug for a transient upstream issue.
 - **503** — upstream transient failure (generic `VoyageError`; Anthropic upstream errors in Step 6 will follow the same hierarchy).
@@ -524,16 +523,21 @@ No retries, no circuit breakers, no custom exception hierarchy.
 
 ## 13. Tests
 
-**Decision:** Three pytest smoke tests. ~80 lines total.
+**Decision:** Three pytest smoke tests covering the load-bearing seams. As shipped: ~240 lines across `tests/conftest.py` and three test files.
 
-1. **Chunker sanity** — feed a sample paragraph, assert chunks have expected size/overlap properties.
-2. **Upload → search smoke** — POST /text, then GET /search, assert at least one result and the top result is from the uploaded doc.
-3. **Citation-source consistency** — POST /chat, assert every citation in `answer_blocks[*].citations` resolves to a `chunk_id` present in `sources`, and each `cited_text` is a verbatim substring of the corresponding source chunk's `text`. (Updated from an earlier `[N]`-style sketch when §8 moved to Anthropic's structured citations.)
+1. **Chunker sanity** — short text yields one chunk; long text yields contiguous-ordinal chunks under `MAX_TOKENS` with observable overlap (the start of `chunks[i+1]` appears inside `chunks[i]`); empty text yields none.
+2. **Upload → search smoke** — POST /text, then GET /search; the just-uploaded document is at the top of the results.
+3. **Citation-source consistency** — POST /chat, assert every citation in `answer_blocks[*].citations` resolves to a `chunk_id` present in `sources`, and each `cited_text` is a verbatim substring of the corresponding source chunk's `text`. (Updated from an earlier `[N]`-style sketch when §8 moved to Anthropic's structured citations.) Empty-citations responses are gated on `body["answer"] == REFUSAL_TEXT` — anything else is a real regression worth catching.
 
 **Why this and not more:**
 - The brief explicitly says they're not evaluating production maturity (CI/CD, full test coverage).
 - But code quality is a grading criterion, and zero tests is a weaker signal than a few well-chosen ones.
 - Three tests demonstrate the discipline without pretending to be a full suite.
+
+**Test-design choices worth recording:**
+- **Real upstreams, not mocks.** Tests hit real Postgres (per docker-compose) and real Voyage / Anthropic. Mock/prod divergence would mask exactly the kinds of integration regressions a smoke suite exists to catch. Tests skip cleanly via `@requires_voyage` / `@requires_anthropic` when an upstream key is unset.
+- **Per-test isolation via snapshot/diff.** `tests/conftest.py`'s `db_cleanup` fixture snapshots `documents.id` pre-test and deletes any new rows post-test (chunks cascade via FK). Reuses the pool already opened by `TestClient`'s lifespan.
+- **uuid-salted upload payloads.** Each `POST /text` text body is prefixed with `[run {uuid4()}]` so the SHA-256 is unique per run. Without the salt, a crashed prior run that left rows in place would short-circuit subsequent runs through `find_existing_by_hash` (§12) and silently bypass the chunk→embed→persist path the test claims to exercise.
 
 ---
 
@@ -551,19 +555,19 @@ No retries, no circuit breakers, no custom exception hierarchy.
 
 ## 15. Deliberate cuts (and why)
 
-Each of these will become a GitHub Issue and an entry in the README's "next steps" section. The point is to make the cuts *legible* — not hidden by omission.
+Each cut is filed as a GitHub Issue and surfaced in the README's "What I left out and why" section. The point is to make the cuts *legible* — not hidden by omission.
 
-| Cut | Why deferred | Effort to add later |
-|---|---|---|
-| **Multi-turn /chat with query rewriting** | Real complexity is in the query rewriter, not the API. Brief asks for single-turn. | ~1 day |
-| **Structure-aware PDF chunking via docling** | Chose plain-text recursive chunking as the baseline. docling adds ML model deps. | ~half-day |
-| **Parent-child / hierarchical chunking** | Real retrieval-quality win, but complicates retrieval and chat. Architecture is designed to make it cheap. | ~1 day |
-| **voyage-context-3 contextual embeddings** | Same dimension as voyage-4 → cheap migration. Better story to ship the standard voyage-4 model first; document-grouped batching adds complexity worth deferring. | ~half-day |
-| **Streaming responses on /chat** | Brief lists it as stretch. Demo is via curl; streaming complicates citation parsing for the reviewer. | ~few hours |
-| **API key auth** | Brief lists it as relevance-gated stretch ("if you find them relevant"). Threat model is empty for a local-only single-tenant demo: no network exposure, no multi-user model, and upstream costs are already gated by `VOYAGE_API_KEY` / `ANTHROPIC_API_KEY` (server-side, operator-controlled). Adding a key would clutter every README curl example without protecting anything in scope. See §14 sketch for the shape if relevance changed. | ~half-day |
-| **Knowledge graph (entities + relations)** | Genuinely interesting, big rabbit hole. Not the foundation the brief asks for. | ~2-3 days |
-| **Per-document language tracking for multilingual lexical ranking** ([#3](https://github.com/nainajnahO/rag-knowledge-base/issues/3)) | Hybrid uses `'simple'` tsv config — covers any language adequately but skips per-language morphology and stop-word lift. Real per-language lexical morphology needs per-doc language detection. See §7.1. | ~half-day |
-| **Production logging/metrics/CI** | Brief explicitly excludes these. | n/a |
+| Cut | Why deferred | Effort to add later | Issue |
+|---|---|---|---|
+| **Multi-turn /chat with query rewriting** | Real complexity is in the query rewriter, not the API. Brief asks for single-turn. | ~1 day | [#25](https://github.com/nainajnahO/rag-knowledge-base/issues/25) |
+| **Structure-aware PDF chunking via docling** | Chose plain-text token-based chunking as the baseline. docling adds ML model deps. | ~half-day | [#26](https://github.com/nainajnahO/rag-knowledge-base/issues/26) |
+| **Parent-child / hierarchical chunking** | Real retrieval-quality win, but complicates retrieval and chat. Architecture is designed to make it cheap. | ~1 day | [#27](https://github.com/nainajnahO/rag-knowledge-base/issues/27) |
+| **voyage-context-3 contextual embeddings** | Same dimension as voyage-4 → cheap migration. Better story to ship the standard voyage-4 model first; document-grouped batching adds complexity worth deferring. | ~half-day | [#28](https://github.com/nainajnahO/rag-knowledge-base/issues/28) |
+| **Streaming responses on /chat** | Brief lists it as stretch. Demo is via curl; streaming complicates citation parsing for the reviewer. | ~few hours | _not filed — defer beyond §15 issue set_ |
+| **API key auth** | Brief lists it as relevance-gated stretch ("if you find them relevant"). Threat model is empty for a local-only single-tenant demo: no network exposure, no multi-user model, and upstream costs are already gated by `VOYAGE_API_KEY` / `ANTHROPIC_API_KEY` (server-side, operator-controlled). Adding a key would clutter every README curl example without protecting anything in scope. See §14 sketch for the shape if relevance changed. | ~half-day | [#29](https://github.com/nainajnahO/rag-knowledge-base/issues/29) |
+| **Knowledge graph (entities + relations)** | Genuinely interesting, big rabbit hole. Not the foundation the brief asks for. | ~2-3 days | [#30](https://github.com/nainajnahO/rag-knowledge-base/issues/30) |
+| **Per-document language tracking for multilingual lexical ranking** | Hybrid uses `'simple'` tsv config — covers any language adequately but skips per-language morphology and stop-word lift. Real per-language lexical morphology needs per-doc language detection. See §7.1. | ~half-day | [#3](https://github.com/nainajnahO/rag-knowledge-base/issues/3) |
+| **Production logging/metrics/CI** | Brief explicitly excludes these. | n/a | _not filed — out of scope_ |
 
 ---
 
@@ -581,10 +585,8 @@ PRs are sized to be individually reviewable. Each merges to `main` with a merge 
 6. **Step 6** — `POST /chat`: retrieval + Sonnet 4.6 + structured citations + four guardrails. **Done.** Path B chosen during planning research after surfacing Anthropic's first-class Search Result content blocks (§8 rewrite). Response carries `answer` (display), `answer_blocks` (native Anthropic shape), and `sources` (all retrieved chunks with `cited` flag and verbatim `cited_text`). See PR for the full set of locked design choices.
 7. **Step 7** — Hybrid search + rerank: tsvector column + RRF query, plus Voyage `rerank-2.5` over the 50-candidate fused pool. **Done.** Replaced dense `/search` and `/chat` retrieval with hybrid+rerank. Dropped the cosine-threshold gate from `/chat` per §8 guardrail #3 — refusal is now structural (empty-retrieval) plus model-driven (system prompt). Schema, retrieval SQL, and `app/rerank.py` shape verified against pgvector and Supabase reference examples; rerank choice and the absent-threshold pattern verified against Anthropic's *Introducing Contextual Retrieval*.
 8. **Step 8** — API key auth dependency. **Skipped** — see §15. Threat model is empty for a local-only single-tenant demo; the brief gates this stretch goal on relevance and there's nothing in scope for a key to defend.
-9. **Step 9** — Smoke tests (pytest).
-10. **Step 10** — README polish, sample documents demonstrating metadata filtering, curl/Postman collection, opening "deliberate cuts" issues.
-
-If time gets tight, drop Step 7 and Step 8 — they become Issues with explanations, which is also signal.
+9. **Step 9** — Smoke tests (pytest). **Done.** Three smoke tests covering chunker invariants, upload→search retrieval, and citation/source consistency. Real upstreams; uuid-salted payloads to keep the chunk→embed→persist path always exercised; per-test snapshot/diff cleanup. See §13.
+10. **Step 10** — README polish, sample documents demonstrating metadata filtering, curl/Postman collection, opening "deliberate cuts" issues. **In flight.** §15 issues filed ([#25](https://github.com/nainajnahO/rag-knowledge-base/issues/25)–[#30](https://github.com/nainajnahO/rag-knowledge-base/issues/30) plus pre-existing [#3](https://github.com/nainajnahO/rag-knowledge-base/issues/3)). README polished in this same step. Sample documents + Postman collection still pending.
 
 ---
 
