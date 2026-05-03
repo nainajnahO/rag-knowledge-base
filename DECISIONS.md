@@ -528,7 +528,7 @@ No retries, no circuit breakers, no custom exception hierarchy.
 
 1. **Chunker sanity** — feed a sample paragraph, assert chunks have expected size/overlap properties.
 2. **Upload → search smoke** — POST /text, then GET /search, assert at least one result and the top result is from the uploaded doc.
-3. **Citation-source consistency** — POST /chat, assert every `[N]` in the answer maps to a `citation: N` in `sources`.
+3. **Citation-source consistency** — POST /chat, assert every citation in `answer_blocks[*].citations` resolves to a `chunk_id` present in `sources`, and each `cited_text` is a verbatim substring of the corresponding source chunk's `text`. (Updated from an earlier `[N]`-style sketch when §8 moved to Anthropic's structured citations.)
 
 **Why this and not more:**
 - The brief explicitly says they're not evaluating production maturity (CI/CD, full test coverage).
