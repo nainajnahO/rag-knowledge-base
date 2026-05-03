@@ -1,8 +1,16 @@
-"""Vector retrieval against the chunks index (DECISIONS.md §3 / §6 / §8).
+"""Hybrid retrieval (DECISIONS.md §7) — dense pgvector + lexical tsvector,
+fused with Reciprocal Rank Fusion.
 
 One function — `retrieve(conn, query, k, filters) -> list[RetrievedChunk]`.
-Endpoints don't write SQL; they call this. Step 5 ships the dense-only path;
-Step 7 (hybrid) replaces the SQL body without changing the signature.
+Endpoints don't write SQL; they call this. The route layer then applies a
+reranker (DECISIONS.md §7.2) over the candidate pool returned here.
+
+Shape mirrors pgvector's canonical RRF example
+(github.com/pgvector/pgvector-python/blob/master/examples/hybrid_search/rrf.py)
+and Supabase's `hybrid_search` RPC (supabase.com/docs/guides/ai/hybrid-search):
+two CTEs (one per lane) joined with FULL OUTER JOIN — a LEFT JOIN would
+silently drop lex-only hits (the very queries the lexical lane exists to
+catch: rare proper nouns, IDs, technical jargon).
 """
 
 import json
@@ -15,6 +23,16 @@ from pydantic import BaseModel, Field
 from app.embeddings import embed_query_with_error_mapping
 from app.models import RetrievedChunk
 
+# RRF constant from Cormack et al. (2009) — the canonical default. pgvector
+# and Supabase both use 60. Smaller k weights top-rank agreement harder;
+# larger k flattens the contribution curve.
+RRF_K = 60
+
+# Per-lane candidate pool. Each lane returns its top N before fusion;
+# matches pgvector's example. The outer LIMIT (passed by callers as `k`)
+# trims the fused pool to what the rerank stage will actually score.
+RRF_CANDIDATES_PER_LANE = 50
+
 
 class Filters(BaseModel):
     """Structured filter input to `retrieve`. Built by route layer from query params."""
@@ -25,12 +43,52 @@ class Filters(BaseModel):
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
-# `SET LOCAL hnsw.iterative_scan = 'strict_order'` keeps HNSW walking the
-# graph past its initial candidate batch until enough rows pass the WHERE
-# predicate to fill LIMIT, while preserving similarity-order in results.
-# Requires pgvector ≥ 0.8.0; the GUC is registered lazily by the extension,
-# so it's set inside an explicit transaction.
-_SQL = """
+# Filters are applied inside both lanes (not just the outer SELECT) so the
+# candidate pool per lane is already post-filter — a selective filter
+# otherwise leaves each lane's top-50 mostly empty after the outer WHERE.
+#
+# `SET LOCAL hnsw.iterative_scan = 'strict_order'` from §6.1 stays for the
+# vec lane: when the planner picks an HNSW Index Scan, iterative_scan keeps
+# walking past the initial batch until enough rows pass the WHERE to fill
+# LIMIT. At small-corpus scale the planner chooses Seq Scan and the GUC is
+# inert — flagged in §6.1 as a deliberate validation gap.
+_SQL = f"""
+WITH vec AS (
+    SELECT
+        c.id,
+        ROW_NUMBER() OVER (ORDER BY c.embedding <=> %(query_vec)s::vector) AS rank
+    FROM chunks c
+    JOIN documents d ON d.id = c.document_id
+    WHERE  (%(author)s::text IS NULL OR d.author = %(author)s::text)
+      AND  (%(after)s::date  IS NULL OR d.published_date >= %(after)s::date)
+      AND  (%(before)s::date IS NULL OR d.published_date <= %(before)s::date)
+      AND  (%(meta)s::jsonb  IS NULL OR d.metadata @> %(meta)s::jsonb)
+    ORDER BY c.embedding <=> %(query_vec)s::vector
+    LIMIT {RRF_CANDIDATES_PER_LANE}
+),
+lex AS (
+    SELECT
+        c.id,
+        ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.tsv, q) DESC) AS rank
+    FROM chunks c
+    JOIN documents d ON d.id = c.document_id,
+         plainto_tsquery('simple', %(query_text)s) q
+    WHERE c.tsv @@ q
+      AND  (%(author)s::text IS NULL OR d.author = %(author)s::text)
+      AND  (%(after)s::date  IS NULL OR d.published_date >= %(after)s::date)
+      AND  (%(before)s::date IS NULL OR d.published_date <= %(before)s::date)
+      AND  (%(meta)s::jsonb  IS NULL OR d.metadata @> %(meta)s::jsonb)
+    ORDER BY ts_rank_cd(c.tsv, q) DESC
+    LIMIT {RRF_CANDIDATES_PER_LANE}
+),
+fused AS (
+    SELECT
+        COALESCE(vec.id, lex.id) AS id,
+        COALESCE(1.0 / ({RRF_K} + vec.rank), 0)
+            + COALESCE(1.0 / ({RRF_K} + lex.rank), 0) AS score
+    FROM vec
+    FULL OUTER JOIN lex ON vec.id = lex.id
+)
 SELECT
     c.id              AS chunk_id,
     c.ordinal         AS ordinal,
@@ -40,14 +98,11 @@ SELECT
     d.author          AS author,
     d.published_date  AS published_date,
     d.metadata        AS metadata,
-    1 - (c.embedding <=> %(query)s::vector) AS score
-FROM chunks c
+    fused.score       AS score
+FROM fused
+JOIN chunks c    ON c.id = fused.id
 JOIN documents d ON d.id = c.document_id
-WHERE  (%(author)s::text IS NULL OR d.author = %(author)s::text)
-  AND  (%(after)s::date  IS NULL OR d.published_date >= %(after)s::date)
-  AND  (%(before)s::date IS NULL OR d.published_date <= %(before)s::date)
-  AND  (%(meta)s::jsonb  IS NULL OR d.metadata @> %(meta)s::jsonb)
-ORDER BY c.embedding <=> %(query)s::vector
+ORDER BY fused.score DESC
 LIMIT %(k)s
 """
 
@@ -58,12 +113,19 @@ def retrieve(
     k: int,
     filters: Filters,
 ) -> list[RetrievedChunk]:
-    """Embed `query` and return the top-k matching chunks under `filters`."""
+    """Embed `query`, run hybrid RRF retrieval, return the top-k candidate chunks.
+
+    `score` on the returned chunks is the RRF fusion score (sum of two
+    1/(k+rank) terms), bounded above by 2/(RRF_K+1) ≈ 0.0328 and not
+    comparable to cosine. The route layer reranks this candidate pool with
+    Voyage rerank-2.5 before returning to the caller / handing to Claude.
+    """
     query_vec = embed_query_with_error_mapping(query)
     meta_json = json.dumps(filters.metadata) if filters.metadata else None
 
     params = {
-        "query": query_vec,
+        "query_vec": query_vec,
+        "query_text": query,
         "author": filters.author,
         "after": filters.published_after,
         "before": filters.published_before,
