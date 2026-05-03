@@ -50,7 +50,7 @@ curl -X POST http://localhost:8000/document \
   -F "file=@Ahody hiring - work sample.pdf"
 # → {"document_id": "...", "n_chunks": 2}
 
-# 7. Search (top-k by cosine similarity; default k=10, max 50)
+# 7. Search (top-k by hybrid retrieval + Voyage rerank; default k=10, max 50)
 curl 'http://localhost:8000/search?q=revenue%20growth'
 
 # 7b. Search with metadata filters (AND across keys, single-value-per-key)
@@ -58,6 +58,10 @@ curl 'http://localhost:8000/search?q=plans&author=Eng%20Leadership&meta.departme
 # → {"results": [{"chunk_id": "...", "ordinal": 0, "document_id": "...",
 #                 "document_title": "...", "author": "...", "published_date": "...",
 #                 "metadata": {...}, "score": 0.57, "text": "..."}]}
+# `score` (in both /search and /chat responses) is Voyage rerank-2.5's
+# `relevance_score` (§7.2). It's not calibrated across queries, so don't
+# compare scores from different requests or threshold on a fixed value —
+# rank order within a single response is the meaningful signal.
 
 # 8. Chat — RAG with structured Anthropic citations
 curl -X POST http://localhost:8000/chat \
