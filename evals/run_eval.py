@@ -91,11 +91,17 @@ def main() -> int:
         cleanup_prior_eval_data()
         ingest_corpus(client)
 
-        results: list[tuple[Question, tuple[bool, int], tuple[bool, int]]] = []
-        for q in QUESTIONS:
-            graph_on = run_question(client, q, use_graph=True)
-            graph_off = run_question(client, q, use_graph=False)
-            results.append((q, graph_on, graph_off))
+        try:
+            results: list[tuple[Question, tuple[bool, int], tuple[bool, int]]] = []
+            for q in QUESTIONS:
+                graph_on = run_question(client, q, use_graph=True)
+                graph_off = run_question(client, q, use_graph=False)
+                results.append((q, graph_on, graph_off))
+        finally:
+            # Clean up after too — leftover EVAL/ docs pollute the test suite
+            # (test_entity_filter_unknown_name_returns_empty asserts an empty
+            # search response and expects a clean DB). Idempotent reruns.
+            cleanup_prior_eval_data()
 
     # Two metrics per mode: pass/fail (correctness) and distinct source
     # count (precision — the graph's actual narrowing effect).

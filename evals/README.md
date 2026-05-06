@@ -66,8 +66,10 @@ retrieval quality, not judging variance.
 
 - LLM-driven extraction is non-deterministic, so the table is a
   single-run snapshot. Rerun to sample again.
-- The eval ingests under `EVAL/`-prefixed titles and cleans up its own
-  data on next run. Other ingested documents are not touched.
+- The eval ingests under `EVAL/`-prefixed titles and cleans up after
+  itself on exit (also at start, defensively). Other ingested documents
+  are not touched. Cleanup runs in a `finally` block so a crash mid-run
+  still empties the harness's data.
 - Entity rows are corpus-global per the KG design (DECISIONS §18.10)
   and are not deleted by cleanup. This is intentional and stable
   across reruns — the resolver finds and reuses existing canonicals
