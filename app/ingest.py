@@ -5,15 +5,23 @@ error mapping (per DECISIONS.md §11), and the same atomic document + chunks
 insert with a UniqueViolation race fallback (per DECISIONS.md §12). This
 module owns those pieces so the routes can stay focused on input validation
 and content shape (text vs PDF).
+
+DECISIONS.md §KG: graph extraction + resolution happens in the route layer
+(before the transaction opens) so an extraction failure never leaves a
+content_hash row behind that would short-circuit the next retry. Inside the
+transaction we persist chunks with returned UUIDs and then write the graph
+rows in one atomic step.
 """
 
 from datetime import date
+from uuid import UUID
 
 import psycopg
 from psycopg import Connection
 
 from app.embeddings import embed_chunks, map_voyage_errors
-from app.models import Chunk, IngestResponse
+from app.graph import persist_graph
+from app.models import Chunk, EntityType, ExtractedGraph, IngestResponse
 
 
 def embed_with_error_mapping(chunks: list[Chunk]) -> list[list[float]]:
@@ -54,8 +62,15 @@ def insert_document_with_chunks(
     content_hash: str,
     chunks: list[Chunk],
     embeddings: list[list[float]],
+    graphs: list[ExtractedGraph],
+    alias_map: dict[tuple[str, EntityType], str],
 ) -> IngestResponse:
-    """Persist the document and all its chunks in one transaction.
+    """Persist document, chunks, and graph rows in one transaction.
+
+    Chunks INSERT is a per-row loop (not executemany) so the generated chunk
+    UUIDs can be captured in order — they're the foreign keys for the graph's
+    chunk_entity_mentions and relations rows, all written in the same
+    transaction via `persist_graph`.
 
     On UniqueViolation (a concurrent request inserted the same content_hash
     between our caller's pre-check and this insert), re-query and return the
@@ -73,13 +88,26 @@ def insert_document_with_chunks(
                 """,
                 (title, author, published_date, metadata, text, content_hash),
             )
-            document_id = cur.fetchone()[0]
-            cur.executemany(
-                "INSERT INTO chunks (document_id, ordinal, text, token_count, embedding) VALUES (%s, %s, %s, %s, %s)",
-                [
-                    (document_id, c.ordinal, c.text, c.token_count, e)
-                    for c, e in zip(chunks, embeddings)
-                ],
+            document_id: UUID = cur.fetchone()[0]
+
+            chunk_ids: list[UUID] = []
+            for c, e in zip(chunks, embeddings):
+                cur.execute(
+                    """
+                    INSERT INTO chunks (document_id, ordinal, text, token_count, embedding)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (document_id, c.ordinal, c.text, c.token_count, e),
+                )
+                chunk_ids.append(cur.fetchone()[0])
+
+            persist_graph(
+                conn,
+                document_id=document_id,
+                chunk_ids=chunk_ids,
+                graphs=graphs,
+                alias_map=alias_map,
             )
     except psycopg.errors.UniqueViolation:
         existing = find_existing_by_hash(conn, content_hash)
