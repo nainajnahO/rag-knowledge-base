@@ -1,4 +1,5 @@
 from datetime import date
+from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
@@ -135,3 +136,40 @@ class ChatResponse(BaseModel):
     answer_blocks: list[AnswerBlock]
     sources: list[ChatSource]
     stop_reason: str | None
+
+
+# DECISIONS.md §KG — knowledge-graph extraction shapes. The four entity
+# types are the brief's three (PERSON/ORGANIZATION/LOCATION) plus EVENT;
+# ARTIFACT is deliberately omitted (see §KG #9). Resolution runs per type
+# (cookbook pattern: same-name entities of different types stay distinct).
+class EntityType(StrEnum):
+    PERSON = "PERSON"
+    ORGANIZATION = "ORGANIZATION"
+    LOCATION = "LOCATION"
+    EVENT = "EVENT"
+
+
+class Entity(BaseModel):
+    name: str
+    type: EntityType
+    description: str
+
+
+class Relation(BaseModel):
+    source: str
+    predicate: str
+    target: str
+
+
+class ExtractedGraph(BaseModel):
+    entities: list[Entity]
+    relations: list[Relation]
+
+
+class Cluster(BaseModel):
+    canonical: str
+    aliases: list[str]
+
+
+class ResolvedClusters(BaseModel):
+    clusters: list[Cluster]

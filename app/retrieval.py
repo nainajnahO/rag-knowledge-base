@@ -41,6 +41,9 @@ class Filters(BaseModel):
     published_after: date | None = None
     published_before: date | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
+    # DECISIONS.md §KG — resolved entity UUIDs (str form) for chunk-level
+    # AND co-mention filtering. Empty list = no entity filter applied.
+    entity_ids: list[str] = Field(default_factory=list)
 
 
 # Filters are applied inside both lanes (not just the outer SELECT) so the
