@@ -26,6 +26,9 @@ CHAT_TOP_K = 8
 
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4096)
+    # Opt-out for the graph pre-filter so the same /chat call can run as the
+    # pre-graph baseline. Default True preserves existing behavior.
+    use_graph: bool = True
 
     @field_validator("question")
     @classmethod
@@ -41,8 +44,11 @@ def chat(req: ChatRequest, conn: ConnDep) -> ChatResponse:
     # DECISIONS.md §18.9: auto-extract entities from the question and
     # resolve to UUIDs for the graph pre-filter. Best-effort — extraction
     # failure or names not in the corpus return an empty list.
-    raw_names = extract_entities_from_question(req.question)
-    entity_ids = resolve_entity_names(conn, raw_names) if raw_names else []
+    if req.use_graph:
+        raw_names = extract_entities_from_question(req.question)
+        entity_ids = resolve_entity_names(conn, raw_names) if raw_names else []
+    else:
+        entity_ids = []
 
     candidates = retrieve(
         conn,
