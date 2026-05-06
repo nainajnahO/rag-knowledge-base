@@ -91,3 +91,41 @@ def extract_graph_from_chunk(chunk: Chunk) -> ExtractedGraph:
 def extract_graphs_from_chunks(chunks: list[Chunk]) -> list[ExtractedGraph]:
     """Extract one graph per chunk, in order. Empty input returns empty output."""
     return [extract_graph_from_chunk(c) for c in chunks]
+
+
+def extract_entities_from_question(question: str) -> list[str]:
+    """Extract entity names from a chat question for graph pre-filtering.
+
+    Reuses the Haiku extraction shape (same prompt, same parsed output type)
+    and returns just the raw entity name strings — UUIDs come later via
+    `app.graph.resolve_entity_names`. This is best-effort: any failure
+    falls through to an empty list so the caller can degrade to plain
+    retrieval rather than refuse the request (DECISIONS.md §KG #14).
+    """
+    try:
+        with map_graph_extract_errors():
+            response = get_client().beta.messages.parse(
+                model=settings.extraction_model,
+                max_tokens=512,
+                system=[
+                    {
+                        "type": "text",
+                        "text": EXTRACTION_SYSTEM,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": EXTRACTION_USER_TMPL.format(text=question),
+                    }
+                ],
+                output_format=ExtractedGraph,
+            )
+    except Exception:
+        # Graph entity extraction is non-critical for /chat. Any failure
+        # — auth, rate limit, network — falls through to plain retrieval.
+        return []
+
+    graph = response.parsed_output
+    return [e.name for e in graph.entities] if graph else []

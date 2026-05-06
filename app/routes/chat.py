@@ -5,6 +5,8 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field, field_validator
 
 from app.db import ConnDep
+from app.graph import resolve_entity_names
+from app.graph_extract import extract_entities_from_question
 from app.llm import REFUSAL_TEXT, generate_answer
 from app.models import (
     AnswerBlock,
@@ -36,7 +38,28 @@ class ChatRequest(BaseModel):
 
 @router.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, conn: ConnDep) -> ChatResponse:
-    candidates = retrieve(conn, req.question, k=RRF_CANDIDATES_PER_LANE, filters=Filters())
+    # DECISIONS.md §KG #13: auto-extract entities from the question and
+    # resolve to UUIDs for the graph pre-filter. Best-effort — extraction
+    # failure or names not in the corpus return an empty list.
+    raw_names = extract_entities_from_question(req.question)
+    entity_ids = resolve_entity_names(conn, raw_names) if raw_names else []
+
+    candidates = retrieve(
+        conn,
+        req.question,
+        k=RRF_CANDIDATES_PER_LANE,
+        filters=Filters(entity_ids=entity_ids),
+    )
+
+    # DECISIONS.md §KG #14: never let the graph hide otherwise-relevant
+    # content. If the entity filter narrowed candidates to zero (entities
+    # the question named aren't yet in the corpus, or co-mention is empty),
+    # retry without the filter so the answer pipeline gets a fair shot.
+    if not candidates and entity_ids:
+        candidates = retrieve(
+            conn, req.question, k=RRF_CANDIDATES_PER_LANE, filters=Filters()
+        )
+
     chunks = rerank(req.question, candidates, top_k=CHAT_TOP_K)
 
     # Refusal is owned by the system prompt + Claude's citation behavior
