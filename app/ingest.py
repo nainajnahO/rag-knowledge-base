@@ -6,7 +6,7 @@ insert with a UniqueViolation race fallback (per DECISIONS.md §12). This
 module owns those pieces so the routes can stay focused on input validation
 and content shape (text vs PDF).
 
-DECISIONS.md §KG: graph extraction + resolution happens in the route layer
+DECISIONS.md §18.4: graph extraction + resolution happens in the route layer
 (before the transaction opens) so an extraction failure never leaves a
 content_hash row behind that would short-circuit the next retry. Inside the
 transaction we persist chunks with returned UUIDs and then write the graph

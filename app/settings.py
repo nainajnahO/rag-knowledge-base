@@ -10,7 +10,7 @@ class Settings(BaseSettings):
 
     embedding_model: str = "voyage-4"
 
-    # DECISIONS.md §KG — Anthropic cookbook split: Haiku for high-volume
+    # DECISIONS.md §18.1 — Anthropic cookbook split: Haiku for high-volume
     # schema-constrained extraction, Sonnet for resolution arbitrating
     # conflicting evidence. Aliases (not dated snapshots) per §9 convention.
     extraction_model: str = "claude-haiku-4-5"

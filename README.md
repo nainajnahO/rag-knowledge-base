@@ -154,7 +154,7 @@ curl -X POST http://localhost:8000/chat \
 
 `sources` includes every retrieved chunk (not just cited ones), each with a `cited` flag and any verbatim `cited_text` quotes — so a reviewer can see what the model had access to.
 
-`/chat` automatically extracts entities from the question and uses them as a graph pre-filter — same retrieval shape `?entity=…` would produce on `/search`. If the entity-filter narrows candidates to zero (entities the question named aren't in the corpus), the handler retries without the filter so the answer pipeline gets a fair shot. ([§18.9](./DECISIONS.md#189-chat-auto-extracts-entities-and-falls-back-if-the-filter-empties))
+`/chat` automatically extracts entities from the question and uses them as a graph pre-filter — same retrieval shape `?entity=…` would produce on `/search`. The pre-filter only activates when the question's surface forms case-insensitively match an alias the resolver stored, so questions phrased with abbreviations the corpus never used (e.g. asking about "Acme" when every doc says "Acme Corporation") silently degrade to plain retrieval. If the entity-filter does activate but narrows candidates to zero (entities are in the corpus but never co-mentioned in a single chunk), the handler retries without the filter so the answer pipeline gets a fair shot. ([§18.9](./DECISIONS.md#189-chat-auto-extracts-entities-and-falls-back-if-the-filter-empties))
 
 </details>
 
@@ -200,7 +200,7 @@ Tests hit the real dev Postgres and the real Voyage / Anthropic upstreams; tests
 - **Lexical lane uses `'simple'` config.** Language-neutral — keeps non-English content from being mis-stemmed, but skips per-language morphology lift. ([issue #3](https://github.com/nainajnahO/rag-knowledge-base/issues/3) / [§7.1](./DECISIONS.md#7-hybrid-search-fusion))
 - **Single-turn `/chat`.** Multi-turn requires query rewriting; doing it badly is worse than not doing it. Brief asks for single-turn. ([§10](./DECISIONS.md#10-chat-shape--single-turn))
 - **Dedupe is silent.** `POST /text` / `/document` ignore new metadata when content matches an existing document by SHA-256. ([§12](./DECISIONS.md#12-upload-dedupe))
-- **Sync graph extraction at ingest** adds ~3-5s of latency per `POST /text` / `POST /document`. Acceptable for the demo scale; async + Batch API is the production path. ([§18.4](./DECISIONS.md#184-why-sync-at-ingest-not-asyncbatch-api))
+- **Sync graph extraction at ingest** adds ~1-2s of latency per `POST /text` / `POST /document` (per-chunk Haiku calls fan out to a thread pool, then ≤4 Sonnet resolution calls run serially). Acceptable for the demo scale; async + Batch API is the production path. ([§18.4](./DECISIONS.md#184-why-sync-at-ingest-not-asyncbatch-api))
 - **Resolution canonicals capped at 200 per type.** Beyond that, older canonicals can be re-split by the resolver. v2 path: embedding-based shortlisting. ([§18.11](./DECISIONS.md#1811-known-limitations-and-their-mitigations--migration-paths))
 
 ## AI collaboration notes

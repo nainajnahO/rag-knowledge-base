@@ -57,7 +57,7 @@ def parse_entity_filter(
 
     Case-insensitive alias lookup via app.graph.resolve_entity_names.
     Names with no matching alias drop silently — under chunk-level AND
-    semantics (DECISIONS.md §KG #10) an unknown name correctly yields
+    semantics (DECISIONS.md §18.7) an unknown name correctly yields
     no chunks (no chunk can mention an entity that doesn't exist).
     """
     return resolve_entity_names(conn, entity) if entity else []

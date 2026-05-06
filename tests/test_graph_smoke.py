@@ -8,12 +8,12 @@ retrieve loop:
   3. ?entity=<org>&entity=<unique-city> AND-filters to chunks from only the
      document that mentions both. The other doc must be absent.
   4. ?entity=<unknown-name> returns empty (under chunk-level AND, an
-     unresolvable name yields no chunks — DECISIONS.md §KG #14 surface).
+     unresolvable name yields no chunks — DECISIONS.md §18.7 surface).
 
 Note: entities are corpus-global (not document-scoped, see DECISIONS.md
-§KG limitations) so cross-test pollution is possible; assertions check
-*absence* of the wrong document rather than position-1 of the right one,
-which is robust to whatever else is in the entities table.
+§18.11 limitations) so cross-test pollution is possible; assertions check
+membership of specific UUIDs (not position or set equality), which is
+robust to whatever else is in the entities table.
 """
 
 from uuid import uuid4
@@ -76,6 +76,13 @@ def test_entity_extraction_and_filtered_search(
     )
     assert r_and.status_code == 200, r_and.text
     and_doc_ids = {res["document_id"] for res in r_and.json()["results"]}
+    # Presence + absence together pin the feature down. A "doc B not present"
+    # check alone passes vacuously when extraction silently misses city_a in
+    # doc A — both docs absent satisfies the negative assertion.
+    assert doc_a_id in and_doc_ids, (
+        f"doc A should surface for ?entity={org}&entity={city_a}; "
+        f"likely extraction missed {city_a}"
+    )
     assert doc_b_id not in and_doc_ids, (
         f"doc B (no {city_a} mention) leaked into ?entity={org}&entity={city_a} results"
     )
@@ -94,3 +101,63 @@ def test_entity_filter_unknown_name_returns_empty(
     )
     assert r.status_code == 200, r.text
     assert r.json()["results"] == [], "expected empty results for unknown entity name"
+
+
+@requires_voyage
+@requires_anthropic
+def test_chat_falls_back_when_entity_filter_yields_zero(
+    client: TestClient,
+    db_cleanup: None,
+) -> None:
+    """The /chat fallback (DECISIONS.md §18.9) re-retrieves without the entity
+    filter when the filter narrows candidates to zero. Constructs a corpus
+    where two entities exist but no single chunk co-mentions them, then asks
+    a question naming both. Without the fallback, retrieval would return
+    empty, /chat would refuse, and `sources` would be empty.
+    """
+    salt = uuid4().hex[:8]
+    org = f"Zorbnak-{salt}"
+    location = f"Belgrade-{salt}"
+
+    # Doc 1 — mentions org only.
+    upload_org = client.post(
+        "/text",
+        json={
+            "title": f"{org} earnings notes",
+            "text": (
+                f"{org} reported strong Q1 2026 earnings. "
+                f"The company's revenue grew 30 percent year over year."
+            ),
+        },
+    )
+    assert upload_org.status_code == 200, upload_org.text
+
+    # Doc 2 — mentions location only. No chunk in the corpus co-mentions both.
+    upload_loc = client.post(
+        "/text",
+        json={
+            "title": f"{location} city overview",
+            "text": (
+                f"{location} is a major European city with a population of two million. "
+                f"Its central district hosts numerous cultural landmarks."
+            ),
+        },
+    )
+    assert upload_loc.status_code == 200, upload_loc.text
+
+    # Question names both entities clearly so question-time extraction picks
+    # them up. Filtered retrieval narrows to zero (no co-mention exists), so
+    # the §18.9 fallback must re-run without the filter for sources to be
+    # non-empty.
+    r = client.post(
+        "/chat",
+        json={"question": f"What can you tell me about {org} and {location}?"},
+    )
+    assert r.status_code == 200, r.text
+
+    body = r.json()
+    assert body["sources"], (
+        "expected non-empty sources; the §18.9 fallback should have re-run "
+        "retrieval without the entity filter after the AND-filter narrowed "
+        "candidates to zero (no chunk co-mentions both entities)"
+    )

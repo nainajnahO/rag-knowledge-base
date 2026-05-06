@@ -38,7 +38,7 @@ CREATE INDEX idx_chunks_embedding
 
 CREATE INDEX idx_chunks_tsv ON chunks USING GIN (tsv);
 
--- DECISIONS.md §KG: Knowledge graph (closes issue #30).
+-- DECISIONS.md §18: Knowledge graph (closes issue #30).
 -- Entities are corpus-global (not document-scoped) so a canonical entity
 -- persists across document deletions; aliases, mentions, and relations
 -- cascade-delete with their owning chunk/document.

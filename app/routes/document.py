@@ -75,7 +75,7 @@ def ingest_document(
 
     embeddings = embed_with_error_mapping(chunks)
 
-    # DECISIONS.md §KG — extraction + resolution run before the transaction
+    # DECISIONS.md §18.4 — extraction + resolution run before the transaction
     # opens. A failure here bails out before any DB rows are written, so a
     # retry won't be short-circuited by the content-hash dedupe path.
     graphs = extract_graphs_from_chunks(chunks)

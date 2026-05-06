@@ -6,7 +6,7 @@ set for that type from the DB (capped to keep the prompt bounded), then
 issues one Sonnet call per type to cluster surface forms into canonical
 entities.
 
-DECISIONS.md §KG #5: per-document-per-type resolution (≤4 Sonnet calls
+DECISIONS.md §18.3: per-document-per-type resolution (≤4 Sonnet calls
 per ingest) rather than per-chunk-per-type (would be ~120 calls). Cookbook's
 incremental "resolve new entities against existing canonical set" pattern.
 """
@@ -39,7 +39,7 @@ RESOLVE_PROMPT_TMPL = (
 # Cap on existing canonicals fed to Sonnet per type to bound prompt growth
 # as the corpus grows. At 200 names × ~20 chars each ≈ 4K characters — well
 # within Sonnet's context. Future v2: embedding-based shortlisting against
-# the new entities (DECISIONS.md §KG known limitations).
+# the new entities (DECISIONS.md §18.11 known limitations).
 _MAX_EXISTING_CANONICALS = 200
 
 
@@ -115,7 +115,32 @@ def _resolve_type(
             output_format=ResolvedClusters,
         )
 
-    return (response.parsed_output or ResolvedClusters(clusters=[])).clusters
+    clusters = (response.parsed_output or ResolvedClusters(clusters=[])).clusters
+    return _anchor_existing_canonicals(clusters, set(existing))
+
+
+def _anchor_existing_canonicals(
+    clusters: list[Cluster], existing_canonicals: set[str]
+) -> list[Cluster]:
+    """Force any cluster's canonical back to a pre-existing DB canonical.
+
+    The cookbook prompt invites Sonnet to pick "the most complete, unambiguous
+    form" as the canonical — which is free to promote a new surface form over
+    a name that's already canonical in the DB. If we let that through,
+    persist_graph would write a second `entities` row for the same real-world
+    entity (the UNIQUE constraint catches only identical canonical_name+type
+    pairs). Whenever a cluster's aliases include a name that's already a
+    canonical in the DB, force the cluster's canonical to that existing name.
+    """
+    if not existing_canonicals:
+        return clusters
+    for cluster in clusters:
+        if cluster.canonical in existing_canonicals:
+            continue
+        overlap = existing_canonicals.intersection(cluster.aliases)
+        if overlap:
+            cluster.canonical = next(iter(overlap))
+    return clusters
 
 
 def resolve_entities(

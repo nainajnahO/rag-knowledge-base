@@ -138,9 +138,9 @@ class ChatResponse(BaseModel):
     stop_reason: str | None
 
 
-# DECISIONS.md §KG — knowledge-graph extraction shapes. The four entity
+# DECISIONS.md §18 — knowledge-graph extraction shapes. The four entity
 # types are the brief's three (PERSON/ORGANIZATION/LOCATION) plus EVENT;
-# ARTIFACT is deliberately omitted (see §KG #9). Resolution runs per type
+# ARTIFACT is deliberately omitted (see §18.6). Resolution runs per type
 # (cookbook pattern: same-name entities of different types stay distinct).
 class EntityType(StrEnum):
     PERSON = "PERSON"

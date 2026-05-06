@@ -38,7 +38,7 @@ class ChatRequest(BaseModel):
 
 @router.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, conn: ConnDep) -> ChatResponse:
-    # DECISIONS.md §KG #13: auto-extract entities from the question and
+    # DECISIONS.md §18.9: auto-extract entities from the question and
     # resolve to UUIDs for the graph pre-filter. Best-effort — extraction
     # failure or names not in the corpus return an empty list.
     raw_names = extract_entities_from_question(req.question)
@@ -51,7 +51,7 @@ def chat(req: ChatRequest, conn: ConnDep) -> ChatResponse:
         filters=Filters(entity_ids=entity_ids),
     )
 
-    # DECISIONS.md §KG #14: never let the graph hide otherwise-relevant
+    # DECISIONS.md §18.9: never let the graph hide otherwise-relevant
     # content. If the entity filter narrowed candidates to zero (entities
     # the question named aren't yet in the corpus, or co-mention is empty),
     # retry without the filter so the answer pipeline gets a fair shot.

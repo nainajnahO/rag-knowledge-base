@@ -670,7 +670,7 @@ Implementation: collect every `(name, type, description)` across the document's 
 
 Anthropic's Batch API (50% off, ≤24 h SLA) is the obvious cost lever for a use case like this. We don't apply it because we deliberately picked **synchronous extraction at ingest** — the user uploads, gets a `document_id` back, and the graph for that document is queryable on the next request. Async would require either a `graph_status` column + polling endpoint or a background-worker fan-out; both add ops surface beyond what the brief asks for ("we're not evaluating production maturity").
 
-The cost: ingest now blocks for ~3-5 seconds (one Haiku per chunk + ≤4 Sonnet calls). For a demo + work-sample corpus this is acceptable; documented as a known trade-off and surfaced in the README so reviewers don't think it's accidental.
+The cost: ingest now blocks for ~1-2 seconds (per-chunk Haiku calls run in a thread pool capped at 10 concurrent — see `app/graph_extract.py` — plus ≤4 Sonnet calls for resolution, all serial after the parallel extraction stage). For a demo + work-sample corpus this is acceptable; documented as a known trade-off and surfaced in the README so reviewers don't think it's accidental.
 
 ### 18.5 Why Postgres relations tables, not Neo4j / Memgraph / Apache AGE
 
@@ -732,7 +732,9 @@ if not candidates and resolved:
     candidates = retrieve(conn, q, k, Filters())
 ```
 
-Without that fallback, the graph could *hide* otherwise-relevant content: a question naming an entity that isn't in the corpus would dead-end at zero candidates and refuse incorrectly. The fallback ensures the graph only adds precision when the corpus has the relevant entities; it never blocks an answer.
+**Coverage caveat.** The pre-filter activates only when the question's surface forms case-insensitively match an alias `persist_graph` wrote — and aliases are limited to what some chunk's Haiku call literally extracted. A question like *"What did Acme do?"* against a corpus where every document says *"Acme Corporation"* produces no alias hit, `entity_ids = []`, and unfiltered retrieval — the graph contribution is silent in that case. The pre-filter is most useful when users phrase questions with the same surface forms the documents use; it degrades to plain hybrid retrieval otherwise. The fallback below covers the *different* failure mode (alias hit, but no chunk co-mentions all named entities).
+
+Without that fallback, the graph could *hide* otherwise-relevant content: a question naming entities that *are* in the corpus but never co-mentioned in a single chunk would dead-end at zero candidates and refuse incorrectly. The fallback ensures the graph only adds precision when the corpus has the relevant entities co-mentioned; it never blocks an answer.
 
 The `/chat` answer pipeline downstream of `retrieve()` is **unchanged** — same rerank, same `search_result` content blocks, same `citations: enabled`. Citations remain at chunk granularity. The graph adds a pre-filter; it doesn't replace any part of the citation machinery (per the user's standing preference for native Anthropic shapes).
 
@@ -751,6 +753,7 @@ Four new tables, all in `sql/schema.sql` (no migration system; reset workflow is
 - **Same-name across types.** "Apple" the ORGANIZATION and "Apple" the LOCATION are two separate `entities` rows (the `UNIQUE` constraint is on the pair). `resolve_entity_names` returns *all* matching entity IDs across types, which is the desired default ("`?entity=Apple` returns chunks mentioning Apple in any capacity"). If type-scoped filtering is needed later, add `?entity_type=ORGANIZATION` — drop-in column filter on `entity_aliases JOIN entities`.
 - **Cross-test entity pollution.** The `db_cleanup` fixture deletes documents but not entities (they're corpus-global). Smoke tests use uuid-salted entity names (`Zorbnak-<8>`, `Belgrade-<8>`) so test runs don't collide; assertions check *absence* of the wrong document rather than position-1 of the right one.
 - **Resolution mis-merges across genuinely distinct entities.** The cookbook's prompt feeds Sonnet the entity description as a disambiguation signal, but ambiguous descriptions ("Apollo 11" the spacecraft vs. the documentary) can still merge incorrectly. A worsening graph quality, not an integrity issue — duplicate canonicals have no DB-level consequence.
+- **Concurrent-ingest race on canonical naming.** `_fetch_existing_canonicals` reads the canonical set before `insert_document_with_chunks` opens its transaction, so two simultaneous ingests can each call Sonnet against the same pre-state. If both extract "Acme" and Sonnet picks "Acme Corporation" for one ingest and "Acme Corp" for the other, both rows commit (the `UNIQUE` constraint is on the literal canonical_name, not on the underlying real-world entity). For the synchronous-curl demo this doesn't fire; under concurrent traffic it would seed the duplicates the resolver is otherwise designed to prevent. Mitigation paths: (a) advisory lock around resolve+persist, (b) move resolution inside the transaction at the cost of serialised ingest, or (c) the embedding-shortlist v2 path above (which would catch the duplicate at persist time even without locking).
 
 ### 18.12 Effort vs. the original 2-3 day estimate
 

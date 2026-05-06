@@ -41,7 +41,7 @@ class Filters(BaseModel):
     published_after: date | None = None
     published_before: date | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
-    # DECISIONS.md §KG — resolved entity UUIDs (str form) for chunk-level
+    # DECISIONS.md §18.7 — resolved entity UUIDs (str form) for chunk-level
     # AND co-mention filtering. Empty list = no entity filter applied.
     entity_ids: list[str] = Field(default_factory=list)
 
@@ -140,7 +140,7 @@ def retrieve(
     query_vec = embed_query_with_error_mapping(query)
     meta_json = json.dumps(filters.metadata) if filters.metadata else None
 
-    # DECISIONS.md §KG: chunk-level AND co-mention. n_entities=0 short-circuits
+    # DECISIONS.md §18.7: chunk-level AND co-mention. n_entities=0 short-circuits
     # the EXISTS clause so behaviour with no entity filter is identical to the
     # pre-graph version. The HAVING COUNT(DISTINCT) gate enforces "every listed
     # entity appears in this chunk" rather than "any one does".

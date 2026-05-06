@@ -7,7 +7,7 @@ Two responsibilities:
   2. Read path — `resolve_entity_names` translates ?entity=X query-param
      names into entity UUIDs (as strings) for the retrieval filter.
 
-DECISIONS.md §KG #12: every relations row stores both source_chunk_id and
+DECISIONS.md §18.8: every relations row stores both source_chunk_id and
 source_document_id so future graph-answer endpoints can cite the exact
 chunk that grounded each edge via the existing search_result blocks.
 """
@@ -28,8 +28,13 @@ def upsert_entity(
 ) -> UUID:
     """Insert or return the entity row for (canonical_name, entity_type).
 
-    ON CONFLICT updates the description so it stays fresh as more
-    documents mention the same canonical entity.
+    ON CONFLICT keeps whichever description is longer. Length is a coarse
+    quality proxy but a robust one: a chunk that mentions an entity in
+    passing tends to produce a thin description ("A company"); a chunk that
+    centers on the entity tends to produce a richer one. Locking in the
+    longer description preserves the resolution prompt's disambiguation
+    signal across ingests instead of clobbering rich descriptions with
+    bare ones.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -37,7 +42,11 @@ def upsert_entity(
             INSERT INTO entities (canonical_name, entity_type, description)
             VALUES (%s, %s, %s)
             ON CONFLICT (canonical_name, entity_type)
-            DO UPDATE SET description = EXCLUDED.description
+            DO UPDATE SET description = CASE
+                WHEN length(EXCLUDED.description) > length(entities.description)
+                THEN EXCLUDED.description
+                ELSE entities.description
+            END
             RETURNING id
             """,
             (canonical_name, entity_type.value, description),

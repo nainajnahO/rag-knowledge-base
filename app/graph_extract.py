@@ -5,13 +5,14 @@ Calls `client.beta.messages.parse(...)` with `ExtractedGraph` as
 so the fixed extraction prompt is a cache hit across the per-chunk loop;
 only the chunk text is a cache miss per call.
 
-DECISIONS.md §KG #4: per-chunk granularity is the GraphRAG / LightRAG /
+DECISIONS.md §18.2: per-chunk granularity is the GraphRAG / LightRAG /
 LlamaIndex / Neo4j industry standard. The Anthropic cookbook's per-document
 shape was designed for short Wikipedia summaries (~1.5K tokens); per-chunk
 fits multi-page PDFs without long-context attention drift.
 """
 
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
 import anthropic
@@ -21,9 +22,15 @@ from app.llm import get_client
 from app.models import Chunk, ExtractedGraph
 from app.settings import settings
 
+# Cap on concurrent Haiku calls during per-chunk extraction. The Anthropic
+# sync client (httpx under the hood) is thread-safe; capping parallelism
+# bounds RPM under typical rate-limit tiers and avoids saturating the
+# httpx connection pool. ~30-chunk doc drops from ~3s to ~0.3s wall time.
+_EXTRACTION_CONCURRENCY = 10
+
 # Verbatim from Anthropic's "Knowledge graph construction with Claude"
 # cookbook (platform.claude.com/cookbook/capabilities-knowledge-graph-guide),
-# with ARTIFACT removed (DECISIONS.md §KG #9 — noisy on memo/report content
+# with ARTIFACT removed (DECISIONS.md §18.6 — noisy on memo/report content
 # due to self-references and weak within-type coherence).
 EXTRACTION_SYSTEM = (
     "Extract a knowledge graph from the document below.\n\n"
@@ -89,8 +96,17 @@ def extract_graph_from_chunk(chunk: Chunk) -> ExtractedGraph:
 
 
 def extract_graphs_from_chunks(chunks: list[Chunk]) -> list[ExtractedGraph]:
-    """Extract one graph per chunk, in order. Empty input returns empty output."""
-    return [extract_graph_from_chunk(c) for c in chunks]
+    """Extract one graph per chunk, in order. Empty input returns empty output.
+
+    Per-chunk calls are independent and run concurrently via ThreadPoolExecutor.
+    `executor.map` preserves order — critical because `persist_graph` zips the
+    chunk UUIDs with the returned graphs by index. The first call that raises
+    (HTTPException after error mapping) propagates and aborts ingest.
+    """
+    if not chunks:
+        return []
+    with ThreadPoolExecutor(max_workers=_EXTRACTION_CONCURRENCY) as executor:
+        return list(executor.map(extract_graph_from_chunk, chunks))
 
 
 def extract_entities_from_question(question: str) -> list[str]:
@@ -100,7 +116,7 @@ def extract_entities_from_question(question: str) -> list[str]:
     and returns just the raw entity name strings — UUIDs come later via
     `app.graph.resolve_entity_names`. This is best-effort: any failure
     falls through to an empty list so the caller can degrade to plain
-    retrieval rather than refuse the request (DECISIONS.md §KG #14).
+    retrieval rather than refuse the request (DECISIONS.md §18.9).
     """
     try:
         with map_graph_extract_errors():
