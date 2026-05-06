@@ -158,9 +158,13 @@ def resolve_entity_names(conn: Connection, names: list[str]) -> list[str]:
     """Resolve a list of raw entity names to entity UUIDs (str form).
 
     Case-insensitive alias lookup. Names that don't match any alias are
-    silently dropped — under chunk-level AND retrieval semantics, an
-    unknown name yields no chunks (the EXISTS+HAVING gate can't be
-    satisfied), which is the correct behaviour.
+    silently dropped from the result. This silent-drop shape is right for
+    /chat (DECISIONS.md §18.9 — graceful degradation falls back to plain
+    hybrid retrieval) but wrong for /search (which contracts that an
+    unknown name yields no chunks); /search wraps this with
+    `parse_entity_filter` in routes/search.py, which appends a sentinel
+    UUID on partial resolution so the AND filter is unsatisfiable rather
+    than silently relaxed.
     """
     if not names:
         return []

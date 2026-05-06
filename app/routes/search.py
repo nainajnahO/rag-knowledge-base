@@ -46,6 +46,15 @@ def parse_meta_filters(request: Request) -> dict[str, str]:
     return {k[5:]: v for k, v in request.query_params.items() if k.startswith("meta.")}
 
 
+# A UUID guaranteed not to match any chunk_entity_mentions row. Appended
+# to the resolved list when a user-passed entity name fails to resolve, so
+# the EXISTS + HAVING COUNT(DISTINCT) = n_entities gate in retrieval.py
+# yields empty results — matching the DECISIONS.md §18.7 contract that
+# "an unknown name yields no chunks." gen_random_uuid() never produces
+# all-zeros, so this is collision-free.
+_UNRESOLVABLE_ENTITY_SENTINEL = "00000000-0000-0000-0000-000000000000"
+
+
 def parse_entity_filter(
     conn: ConnDep,
     entity: Annotated[
@@ -55,12 +64,32 @@ def parse_entity_filter(
 ) -> list[str]:
     """Resolve repeated ?entity=<name> query params to entity UUIDs (str form).
 
-    Case-insensitive alias lookup via app.graph.resolve_entity_names.
-    Names with no matching alias drop silently — under chunk-level AND
-    semantics (DECISIONS.md §18.7) an unknown name correctly yields
-    no chunks (no chunk can mention an entity that doesn't exist).
+    Case-insensitive alias lookup via app.graph.resolve_entity_names. When
+    every passed name resolves, returns the deduped UUID list and retrieval
+    runs the standard chunk-level AND filter. When *any* passed name fails
+    to match an alias, the filter is unsatisfiable (no chunk can mention an
+    entity that doesn't exist) so this function appends an
+    `_UNRESOLVABLE_ENTITY_SENTINEL` UUID — the EXISTS+HAVING gate then
+    yields empty results.
+
+    /chat takes a different path (DECISIONS.md §18.9): unresolved names
+    silently drop and the route falls back to plain hybrid retrieval rather
+    than emptying. /chat calls `resolve_entity_names` directly, not this.
     """
-    return resolve_entity_names(conn, entity) if entity else []
+    if not entity:
+        return []
+
+    resolved = resolve_entity_names(conn, entity)
+
+    # Per-name probe to detect any name that failed to resolve. Comparing
+    # len(resolved) to len(entity) isn't reliable: aliases of the same
+    # canonical entity collapse to one UUID, so `[Acme, Acme Corp]` (both
+    # aliases of one entity) returns one UUID even though both names
+    # resolved successfully.
+    if any(not resolve_entity_names(conn, [name]) for name in entity):
+        resolved = [*resolved, _UNRESOLVABLE_ENTITY_SENTINEL]
+
+    return resolved
 
 
 @router.get("/search", response_model=SearchResponse)

@@ -105,6 +105,46 @@ def test_entity_filter_unknown_name_returns_empty(
 
 @requires_voyage
 @requires_anthropic
+def test_search_partial_resolve_yields_empty(
+    client: TestClient,
+    db_cleanup: None,
+) -> None:
+    """When some entity names resolve and others don't, the AND filter is
+    unsatisfiable so /search returns empty — pinning the parse_entity_filter
+    sentinel-padding behavior. Without that pad, the unresolved name silently
+    drops and the filter relaxes to the resolved subset, returning chunks
+    that mention only the resolved name (a UX trap: user filtered by X+Y,
+    got chunks mentioning just X).
+    """
+    salt = uuid4().hex[:8]
+    org = f"Pellican-{salt}"
+
+    upload = client.post(
+        "/text",
+        json={
+            "title": f"{org} background",
+            "text": (
+                f"{org} is a logistics startup based in Madrid. "
+                f"Its CEO is Sofia Ruiz-{salt}."
+            ),
+        },
+    )
+    assert upload.status_code == 200, upload.text
+
+    r = client.get(
+        "/search",
+        params={"q": org, "entity": [org, f"NonexistentEntity-{uuid4().hex}"]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["results"] == [], (
+        "expected empty results: one resolvable + one unresolvable name "
+        "should empty under chunk-level AND, not silently drop the unknown "
+        "and return chunks for the rest"
+    )
+
+
+@requires_voyage
+@requires_anthropic
 def test_chat_falls_back_when_entity_filter_yields_zero(
     client: TestClient,
     db_cleanup: None,
