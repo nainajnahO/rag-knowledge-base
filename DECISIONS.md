@@ -565,7 +565,7 @@ Each cut is filed as a GitHub Issue and surfaced in the README's "What I left ou
 | **voyage-context-3 contextual embeddings** | Same dimension as voyage-4 → cheap migration. Better story to ship the standard voyage-4 model first; document-grouped batching adds complexity worth deferring. | ~half-day | [#28](https://github.com/nainajnahO/rag-knowledge-base/issues/28) |
 | **Streaming responses on /chat** | Brief lists it as stretch. Demo is via curl; streaming complicates citation parsing for the reviewer. | ~few hours | _not filed — defer beyond §15 issue set_ |
 | **API key auth** | Brief lists it as relevance-gated stretch ("if you find them relevant"). Threat model is empty for a local-only single-tenant demo: no network exposure, no multi-user model, and upstream costs are already gated by `VOYAGE_API_KEY` / `ANTHROPIC_API_KEY` (server-side, operator-controlled). Adding a key would clutter every README curl example without protecting anything in scope. See §14 sketch for the shape if relevance changed. | ~half-day | [#29](https://github.com/nainajnahO/rag-knowledge-base/issues/29) |
-| **Knowledge graph (entities + relations)** | Genuinely interesting, big rabbit hole. Not the foundation the brief asks for. | ~2-3 days | [#30](https://github.com/nainajnahO/rag-knowledge-base/issues/30) |
+| **Knowledge graph (entities + relations)** | ~~Genuinely interesting, big rabbit hole.~~ **Implemented** in [#30](https://github.com/nainajnahO/rag-knowledge-base/issues/30) — see §18. | _shipped_ | [#30](https://github.com/nainajnahO/rag-knowledge-base/issues/30) |
 | **Per-document language tracking for multilingual lexical ranking** | Hybrid uses `'simple'` tsv config — covers any language adequately but skips per-language morphology and stop-word lift. Real per-language lexical morphology needs per-doc language detection. See §7.1. | ~half-day | [#3](https://github.com/nainajnahO/rag-knowledge-base/issues/3) |
 | **Production logging/metrics/CI** | Brief explicitly excludes these. | n/a | _not filed — out of scope_ |
 
@@ -587,6 +587,7 @@ PRs are sized to be individually reviewable. Each merges to `main` with a merge 
 8. **Step 8** — API key auth dependency. **Skipped** — see §15. Threat model is empty for a local-only single-tenant demo; the brief gates this stretch goal on relevance and there's nothing in scope for a key to defend.
 9. **Step 9** — Smoke tests (pytest). **Done.** Three smoke tests covering chunker invariants, upload→search retrieval, and citation/source consistency. Real upstreams; uuid-salted payloads to keep the chunk→embed→persist path always exercised; per-test snapshot/diff cleanup. See §13.
 10. **Step 10** — README polish, sample documents demonstrating metadata filtering, curl/Postman collection, opening "deliberate cuts" issues. **In flight.** §15 issues filed ([#25](https://github.com/nainajnahO/rag-knowledge-base/issues/25)–[#30](https://github.com/nainajnahO/rag-knowledge-base/issues/30) plus pre-existing [#3](https://github.com/nainajnahO/rag-knowledge-base/issues/3)). README polished in this same step. Sample documents + Postman collection still pending.
+11. **Step 11** — Knowledge graph: per-chunk Haiku entity extraction + per-document-per-type Sonnet resolution + entity-aware retrieval. **Done.** Closes [#30](https://github.com/nainajnahO/rag-knowledge-base/issues/30); see §18 for the load-bearing decisions.
 
 ---
 
@@ -623,3 +624,143 @@ PRs are sized to be individually reviewable. Each merges to `main` with a merge 
 - **Where the constants live.** `MAX_UPLOAD_BYTES = 25 * 1024 * 1024`, `MAX_TEXT_CHARS = 3_000_000`, and the `MaxText` type alias all live as module-level definitions in `app/limits.py`. Middleware imports `MAX_UPLOAD_BYTES`; `IngestTextRequest` imports `MaxText`; `app/extraction.py` imports `MAX_TEXT_CHARS` directly for its page-by-page running-total check. Not surfaced through `Settings` / env vars — these are tied to embedding economics and worker memory, not per-deployment knobs.
 
 **Migration notes:** None — these are operational constants. If a real customer uploads a document that hits either cap, the cap moves (one edit in `app/limits.py`); the *structure* (file cap + text cap, two layers) is the load-bearing decision.
+
+---
+
+## 18. Knowledge graph (closes #30)
+
+**Decision:** Add a knowledge graph layer on top of the existing hybrid retrieval. Entities (PERSON, ORGANIZATION, LOCATION, EVENT) and relations (typed edges with edge provenance back to a chunk) are extracted per-chunk via Haiku and resolved per-document-per-type via Sonnet, both at ingest time. `GET /search` accepts repeated `?entity=X&entity=Y` params with chunk-level AND co-mention semantics; `POST /chat` auto-extracts entities from the question and uses the same filter, with a fallback to plain retrieval if the filter narrows to zero candidates. Relations are stored but not yet queryable — the v1 surface is entity co-mention, which is what the brief's example asks for.
+
+The implementation closes [issue #30](https://github.com/nainajnahO/rag-knowledge-base/issues/30) ("Defer: knowledge graph (entities + relations)"). Brief stretch goal wording: *"extract entities (people, organizations, places) from the documents and store relationships (e.g., Neo4j, Memgraph, or a relations table). Show how the graph can improve retrieval (e.g., 'all documents that mention X together with Y')."*
+
+### 18.1 Why native Anthropic Structured Outputs (and which model where)
+
+Extraction and resolution both use `client.beta.messages.parse(...)` (Anthropic's Structured Outputs) with Pydantic schemas — the exact path Anthropic's *Knowledge Graph Construction with Claude* cookbook documents (March 2026 release, `platform.claude.com/cookbook/capabilities-knowledge-graph-guide`). No hand-rolled JSON parsing, no tool-use round-trip; the SDK validates parsed output against the same Pydantic models the rest of the codebase uses.
+
+**Model split** matches the cookbook:
+
+- **Extraction** uses `claude-haiku-4-5` — high-volume schema-constrained work where speed and cost dominate (one call per chunk, ~30 chunks per typical multi-page doc).
+- **Resolution** uses `claude-sonnet-4-6` — arbitrating conflicting evidence across surface forms (is "Acme" the company, the cartoon brand, or the holding company?). Sonnet's better at the "weigh descriptions, decide what merges" call than Haiku is.
+
+**SDK note on `output_format` deprecation.** As of the structured-outputs beta (`structured-outputs-2025-12-15`), the SDK emits a `DeprecationWarning` for the `output_format=Pydantic` keyword in favor of `output_config={"format": ...}`. We keep `output_format` because the deprecated parameter is what populates `ParsedBetaMessage.parsed_output` end-to-end (the SDK's `parse()` method auto-runs the API request *and* parses the response into the Pydantic type); the new `output_config.format` API requires manual JSON-schema generation via private SDK helpers (`transform_schema`) and skips the parse step. The cookbook still uses the deprecated kwarg verbatim. Worth migrating once the SDK exposes a public path that preserves auto-parse.
+
+### 18.2 Why per-chunk extraction (the cookbook's outlier choice)
+
+The cookbook's example extracts per-document. Industry consensus disagrees — every production graph-RAG framework I surveyed extracts per chunk:
+
+| Framework | Granularity | How it handles cross-chunk relations |
+|---|---|---|
+| Microsoft GraphRAG | Per text-unit (chunk) | Merges entities with same title+type across chunks; configurable chunk overlap |
+| LightRAG | Per chunk (default 4k tokens) | Chunk overlap (128 tokens) + "gleaning" retry pass |
+| LlamaIndex `PropertyGraphIndex` | Per chunk node | Each chunk becomes a graph node; `MENTIONS` edge from chunk → entity |
+| Neo4j `LLMGraphTransformer` | Per chunk (combinable via `NUMBER_OF_CHUNKS_TO_COMBINE`) | `HAS_ENTITY` edge from chunk → entity |
+| Anthropic cookbook | Per **document** | Designed for short Wikipedia summaries (~1.5k tokens — ~2× our chunk size) |
+
+The cookbook gets away with per-document because its example is short atomic Wikipedia summaries. Real customer content (multi-page PDFs, long memos) would either overflow a single Haiku call or suffer long-context attention drift on the back half of the document. Per-chunk is the industry's answer; chunk overlap (we already ship 15%) plus the resolution pass we already chose handle the "relations split across chunks" mitigation.
+
+The trade is more LLM calls per ingest. Mitigated by **prompt caching** on the extraction system block: the fixed prompt + schema is reused across every per-chunk call in a document, so chunk text is the only varying input. At ~30 chunks per doc, this turns N expensive calls into one expensive + (N-1) cheap.
+
+### 18.3 Why per-document-per-type resolution (not per-chunk-per-type)
+
+If the cookbook's pure incremental pattern were applied at chunk granularity, resolution would issue one Sonnet call per chunk per type — at 30 chunks × 4 types that's 120 Sonnet calls per ingest. Per-document-per-type collapses to ≤4 Sonnet calls per ingest (one for each `EntityType` that has at least one entity in this document).
+
+Implementation: collect every `(name, type, description)` across the document's chunks, dedupe by `(name, type)`, pull the existing canonical set per type from the DB (capped at `_MAX_EXISTING_CANONICALS = 200` to bound prompt growth), and feed that combined list to one `messages.parse()` call. The cookbook's existing-canonicals-as-anchors trick keeps previously resolved entities from being re-split between ingests.
+
+### 18.4 Why sync at ingest, not async/Batch API
+
+Anthropic's Batch API (50% off, ≤24 h SLA) is the obvious cost lever for a use case like this. We don't apply it because we deliberately picked **synchronous extraction at ingest** — the user uploads, gets a `document_id` back, and the graph for that document is queryable on the next request. Async would require either a `graph_status` column + polling endpoint or a background-worker fan-out; both add ops surface beyond what the brief asks for ("we're not evaluating production maturity").
+
+The cost: ingest now blocks for ~3-5 seconds (one Haiku per chunk + ≤4 Sonnet calls). For a demo + work-sample corpus this is acceptable; documented as a known trade-off and surfaced in the README so reviewers don't think it's accidental.
+
+### 18.5 Why Postgres relations tables, not Neo4j / Memgraph / Apache AGE
+
+The brief offers three storage choices: *"Neo4j, Memgraph, or a relations table"* — the third option is explicitly endorsed. We pick it because:
+
+1. **One store**, per §1's stack-minimization principle. Neo4j would mean a second container, a second connection pool, second authentication surface, and either denormalized entity IDs across two stores or a sync job between them.
+2. **One-hop traversal is enough.** The brief's example query — *"all documents that mention X together with Y"* — is a one-hop set intersection, not a Cypher pattern match. SQL handles it cleanly via `EXISTS + GROUP BY + HAVING COUNT(DISTINCT)`. Cypher pays for itself when you're walking 3+ hops or pattern-matching cycles; we're not.
+3. **Clean upgrade path if needed later.** The Postgres schema (`entities`, `entity_aliases`, `chunk_entity_mentions`, `relations`) maps 1:1 to a Neo4j property graph — there's nothing to throw away if a real customer surfaces a deep-traversal use case.
+
+Apache AGE (Postgres extension that adds Cypher) was the runner-up. Rejected for v1 because it requires modifying the Docker image and Cypher buys nothing for the brief's example query.
+
+### 18.6 Entity types: PERSON, ORGANIZATION, LOCATION, EVENT (no ARTIFACT)
+
+The brief names PERSON, ORGANIZATION, LOCATION explicitly. We add EVENT — memo and report content is heavily time-anchored, so *"Q3 2025 earnings call"* and *"Acme acquisition of Antwerp Hub"* become first-class queryable nodes rather than just substrings inside chunks.
+
+We deliberately omit the cookbook's fifth type, ARTIFACT (products, software, regulations, file names, vehicles). It would have helped — but the cost-benefit doesn't pencil out for this corpus:
+
+1. **Self-references.** A memo titled *"Q3 2025 Strategy Update.pdf"* would extract itself as an ARTIFACT. Now every chunk in the memo "mentions" the memo itself, and `?entity=Q3 2025 Strategy Update` returns the memo's own chunks back to itself — circular and useless. One bogus self-entity per ingested document.
+2. **Weak within-type coherence breaks resolution.** The Sonnet resolver clusters surface forms within a type. PERSON works because two "Tim Cook" mentions almost certainly refer to the same human. ARTIFACT bundles unrelated kinds of things (iPhone 17 + GDPR + Apollo 11 + report.pdf) — the resolver either over-merges entities that share words or under-merges entities under different surface forms ("the report" vs. "Q3 Memo").
+3. **Demo muddying.** The brief's *"X together with Y"* assumes meaningful named entities. ARTIFACT noise would seed the entity list with semantically thin items — exactly the wrong impression for evaluation criterion #1 ("sensible choices … no obvious holes").
+
+Mitigations exist (a stop-list, post-filter on document-title overlap, a constrained ARTIFACT-extraction prompt) but each is hand-rolled remediation work *because* we took ARTIFACT. Cleaner not to.
+
+### 18.7 Chunk-level AND co-mention as the `/search` default
+
+`/search?entity=X&entity=Y` returns only chunks where every listed entity is mentioned in **the same chunk**, not just the same document. SQL gate inside both the vec and lex CTEs:
+
+```sql
+AND (%(n_entities)s = 0 OR EXISTS (
+        SELECT 1 FROM chunk_entity_mentions cem
+        WHERE cem.chunk_id = c.id
+          AND cem.entity_id = ANY(%(entity_ids)s::uuid[])
+        GROUP BY cem.chunk_id
+        HAVING COUNT(DISTINCT cem.entity_id) = %(n_entities)s
+   ))
+```
+
+Why chunk-level over document-level (the brief's literal wording):
+
+- **Stronger signal for citations.** A chunk that itself names both X and Y is the strongest evidence the LLM can cite from. Document-level co-mention can return a chunk that names neither, leaving citation grounding on parts of the document Claude never sees.
+- **Document-level is a trivial rollup** if we ever expose it: `SELECT DISTINCT document_id FROM …`. Going the other direction (deriving chunk-level from a doc-level store) would require re-running extraction.
+- **The `%(n_entities)s = 0` short-circuit** preserves identical no-filter behaviour. Pre-graph queries are byte-identical post-graph when no `?entity=` is supplied.
+
+### 18.8 Relations stored, not queryable in v1
+
+The brief asks to *"store relationships,"* and we do — every relation row carries `source_entity_id`, `predicate`, `target_entity_id`, plus `source_chunk_id` and `source_document_id` for **edge provenance** (each extracted relation can be cited back to the chunk that grounded it).
+
+We stop short of exposing `?relation=Acme:supplied-by:Antwerp` on `/search` for v1. That surface needs its own design: a query parser, a prompt to extract a relation from the chat question (not just entities), a different SQL shape, and tests for the relation-grounding round-trip. It's a follow-up PR — the v1 demo is co-mention, which is what the brief's example asks for.
+
+The provenance columns are a ~1-hour bonus that costs nothing now and unblocks two future things: (a) a graph-traversal answer endpoint that can cite edges via the existing search_result blocks, and (b) a debugging surface to trace any incorrect relation back to the chunk text that produced it.
+
+### 18.9 `/chat` auto-extracts entities and falls back if the filter empties
+
+The bridge from a free-text question to entity-aware retrieval is `extract_entities_from_question(question) → list[str]` — a small `messages.parse()` call against the same `ExtractedGraph` schema, with a wide `try/except` that returns `[]` on any failure. The handler resolves names to UUIDs, threads them into `Filters`, and **retries retrieval without the filter if the filter narrowed candidates to zero**:
+
+```python
+candidates = retrieve(conn, q, k, Filters(entity_ids=resolved))
+if not candidates and resolved:
+    candidates = retrieve(conn, q, k, Filters())
+```
+
+Without that fallback, the graph could *hide* otherwise-relevant content: a question naming an entity that isn't in the corpus would dead-end at zero candidates and refuse incorrectly. The fallback ensures the graph only adds precision when the corpus has the relevant entities; it never blocks an answer.
+
+The `/chat` answer pipeline downstream of `retrieve()` is **unchanged** — same rerank, same `search_result` content blocks, same `citations: enabled`. Citations remain at chunk granularity. The graph adds a pre-filter; it doesn't replace any part of the citation machinery (per the user's standing preference for native Anthropic shapes).
+
+### 18.10 Schema details
+
+Four new tables, all in `sql/schema.sql` (no migration system; reset workflow is `docker compose down -v && docker compose up -d`):
+
+- **`entities`** — `(canonical_name, entity_type)` is `UNIQUE`. Entities are corpus-global (not document-scoped) so a canonical entity persists even after every document mentioning it is deleted. `description` is updated on conflict so it stays fresh as more docs mention the same canonical.
+- **`entity_aliases`** — `(entity_id, alias)` `UNIQUE`. `idx_entity_aliases_lower` on `LOWER(alias)` powers case-insensitive `?entity=` resolution at query time.
+- **`chunk_entity_mentions`** — composite PK `(chunk_id, entity_id)`. Both directions indexed (`idx_cem_chunk_id`, `idx_cem_entity_id`) so the EXISTS+HAVING gate runs cheaply.
+- **`relations`** — every row carries both `source_chunk_id` and `source_document_id` (edge provenance per §18.8). Cascading FKs on chunks, documents, and entities mean a `DELETE FROM documents` cleans the graph transitively without leaving dangling rows.
+
+### 18.11 Known limitations (and their mitigations / migration paths)
+
+- **Resolution prompt cap (`_MAX_EXISTING_CANONICALS = 200`).** As the corpus grows the canonical set per type can exceed 200. Past that we feed the most recent 200 by `created_at`; older canonicals beyond the cap can be re-split if the resolver thinks the new entity is distinct. v2 path: embedding-shortlist the existing canonicals against the new entity before sending to Sonnet.
+- **Same-name across types.** "Apple" the ORGANIZATION and "Apple" the LOCATION are two separate `entities` rows (the `UNIQUE` constraint is on the pair). `resolve_entity_names` returns *all* matching entity IDs across types, which is the desired default ("`?entity=Apple` returns chunks mentioning Apple in any capacity"). If type-scoped filtering is needed later, add `?entity_type=ORGANIZATION` — drop-in column filter on `entity_aliases JOIN entities`.
+- **Cross-test entity pollution.** The `db_cleanup` fixture deletes documents but not entities (they're corpus-global). Smoke tests use uuid-salted entity names (`Zorbnak-<8>`, `Belgrade-<8>`) so test runs don't collide; assertions check *absence* of the wrong document rather than position-1 of the right one.
+- **Resolution mis-merges across genuinely distinct entities.** The cookbook's prompt feeds Sonnet the entity description as a disambiguation signal, but ambiguous descriptions ("Apollo 11" the spacecraft vs. the documentary) can still merge incorrectly. A worsening graph quality, not an integrity issue — duplicate canonicals have no DB-level consequence.
+
+### 18.12 Effort vs. the original 2-3 day estimate
+
+Filed in §15 at 2-3 days. Shipped in 12 small commits on `knowledge-graph-entity-extraction`. What got cut against the cookbook's full pipeline:
+
+- No stage-3 entity profile summarization (cookbook's hub-node summaries) — brief doesn't ask for it
+- No `?relation=A:p:B` query surface — see §18.8
+- No GET /entities or GET /entities/{id}/relations inspection endpoints — relations are present in the DB and inspectable via psql
+- No ARTIFACT type — see §18.6
+- No embedding-based shortlisting for resolution — see §18.11
+- No async / Batch API — see §18.4
+
+Each of those is a clear future PR; the v1 ships the brief's stretch goal cleanly without dragging them in.

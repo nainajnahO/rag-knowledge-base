@@ -45,13 +45,13 @@ docker compose down -v && docker compose up -d
 
 ## API reference
 
-| Method | Path        | Purpose                                       |
-|--------|-------------|-----------------------------------------------|
-| GET    | `/health`   | Liveness check                                |
-| POST   | `/text`     | Ingest plain text                             |
-| POST   | `/document` | Ingest a PDF (multipart upload)               |
-| GET    | `/search`   | Hybrid search + Voyage rerank                 |
-| POST   | `/chat`     | RAG chat with structured Anthropic citations  |
+| Method | Path        | Purpose                                                              |
+|--------|-------------|----------------------------------------------------------------------|
+| GET    | `/health`   | Liveness check                                                       |
+| POST   | `/text`     | Ingest plain text (extracts knowledge graph)                         |
+| POST   | `/document` | Ingest a PDF (multipart upload; extracts knowledge graph)            |
+| GET    | `/search`   | Hybrid search + Voyage rerank, with optional entity-aware filtering  |
+| POST   | `/chat`     | RAG chat with structured Anthropic citations + auto entity-awareness |
 
 <details>
 <summary><code>POST /text</code> — ingest plain text</summary>
@@ -109,6 +109,15 @@ curl 'http://localhost:8000/search?q=plans&author=Eng%20Leadership&meta.departme
 
 **`meta.*` filter caveats.** Query-string values are always strings, so `meta.year=2025` builds `metadata @> '{"year": "2025"}'` and won't match an integer-typed `{"year": 2025}` (JSONB containment requires exact type match). To filter on int/bool metadata today, ingest those values as strings. Nested keys (`meta.a.b=v`) and empty keys (`meta.=v`) are treated as flat keys, not unpacked. Not surfaced in `/openapi.json` since FastAPI can't infer dynamic key prefixes — this README is the canonical reference.
 
+**Entity-aware filtering** (knowledge graph). Repeat `?entity=` to require chunk-level co-mention of every named entity:
+
+```bash
+# "All chunks where Acme Corporation AND Berlin are both mentioned"
+curl 'http://localhost:8000/search?q=expansion&entity=Acme%20Corporation&entity=Berlin'
+```
+
+Names match aliases case-insensitively (the resolution stage stores `Acme`, `Acme Corp`, `Acme Inc.` under one canonical entity). An unknown name yields zero results — under chunk-level AND, no chunk can mention an entity that isn't in the graph. ([§18](./DECISIONS.md#18-knowledge-graph-closes-30))
+
 </details>
 
 <details>
@@ -145,6 +154,8 @@ curl -X POST http://localhost:8000/chat \
 
 `sources` includes every retrieved chunk (not just cited ones), each with a `cited` flag and any verbatim `cited_text` quotes — so a reviewer can see what the model had access to.
 
+`/chat` automatically extracts entities from the question and uses them as a graph pre-filter — same retrieval shape `?entity=…` would produce on `/search`. If the entity-filter narrows candidates to zero (entities the question named aren't in the corpus), the handler retries without the filter so the answer pipeline gets a fair shot. ([§18.9](./DECISIONS.md#189-chat-auto-extracts-entities-and-falls-back-if-the-filter-empties))
+
 </details>
 
 ## Architecture
@@ -159,8 +170,9 @@ curl -X POST http://localhost:8000/chat \
 | **Hybrid search + rerank** | RRF (`k=60`, 50 candidates per lane) → Voyage `rerank-2.5` → top-K. | RRF is parameter-free; no score normalization needed. Voyage reranker is a natural drop-in. ([§7](./DECISIONS.md#7-hybrid-search-fusion) / [§7.2](./DECISIONS.md#72-reranker--voyage-rerank-25)) |
 | **Citations** | Anthropic structured citations (`search_result_location`). Each claim carries a verbatim `cited_text` quote tied to a retrieved chunk. | Reviewer can verify claims in seconds; no `[N]` parsing. ([§8](./DECISIONS.md#8-citation-approach-the-load-bearing-one)) |
 | **Chat LLM** | Claude Sonnet 4.6, single-turn. | Production default for grounded RAG; single-turn matches the brief. Multi-turn opens a query-rewriting subproblem. ([§9](./DECISIONS.md#9-chat-llm) / [§10](./DECISIONS.md#10-chat-shape--single-turn)) |
+| **Knowledge graph** | Per-chunk Haiku extraction (PERSON / ORGANIZATION / LOCATION / EVENT) + per-document-per-type Sonnet resolution. Postgres relations tables; chunk-level AND co-mention on `?entity=`. | Industry-standard per-chunk extraction (GraphRAG / LightRAG / LlamaIndex / Neo4j); native Anthropic Structured Outputs via `messages.parse`; one DB instead of bolting on Neo4j. ([§18](./DECISIONS.md#18-knowledge-graph-closes-30)) |
 
-Deliberate cuts (multi-turn chat, structure-aware PDF chunking, parent-child chunking, contextual embeddings, streaming `/chat`, API key auth, knowledge graphs) are listed in [`DECISIONS.md §15`](./DECISIONS.md#15-deliberate-cuts-and-why) with effort estimates, each filed as a GitHub Issue ([#3](https://github.com/nainajnahO/rag-knowledge-base/issues/3), [#25](https://github.com/nainajnahO/rag-knowledge-base/issues/25)–[#30](https://github.com/nainajnahO/rag-knowledge-base/issues/30)).
+Deliberate cuts (multi-turn chat, structure-aware PDF chunking, parent-child chunking, contextual embeddings, streaming `/chat`, API key auth) are listed in [`DECISIONS.md §15`](./DECISIONS.md#15-deliberate-cuts-and-why) with effort estimates, each filed as a GitHub Issue ([#3](https://github.com/nainajnahO/rag-knowledge-base/issues/3), [#25](https://github.com/nainajnahO/rag-knowledge-base/issues/25)–[#29](https://github.com/nainajnahO/rag-knowledge-base/issues/29)). The previously-deferred knowledge graph ([#30](https://github.com/nainajnahO/rag-knowledge-base/issues/30)) shipped — see [§18](./DECISIONS.md#18-knowledge-graph-closes-30).
 
 ## Data model
 
@@ -168,25 +180,28 @@ Two tables: `documents` (one row per uploaded source — title, author, publishe
 
 ## Tests
 
-Three pytest smoke tests covering the load-bearing seams:
+Four pytest smoke tests covering the load-bearing seams:
 
 1. **Chunker sanity** (`tests/test_chunker.py`) — short text yields one chunk; long text yields contiguous-ordinal chunks under `MAX_TOKENS` with observable overlap; empty text yields none.
 2. **Upload → search smoke** (`tests/test_search_smoke.py`) — `POST /text` then `GET /search` returns the just-uploaded document at the top.
 3. **Citation consistency** (`tests/test_chat_citations.py`) — every citation in `answer_blocks[*].citations` resolves to a `chunk_id` in `sources`, and each `cited_text` is a verbatim substring of the source chunk.
+4. **Entity-filtered search** (`tests/test_graph_smoke.py`) — two docs share an organization but mention different cities; single-entity filter surfaces both, AND filter on org+city excludes the doc that doesn't co-mention; an unknown entity name yields empty results.
 
 ```bash
-uv run pytest -q   # ~5 seconds; needs both API keys + Postgres up
+uv run pytest -q   # ~55 seconds with the graph tests; needs both API keys + Postgres up
 ```
 
 Tests hit the real dev Postgres and the real Voyage / Anthropic upstreams; tests that need an upstream key skip cleanly when the key is unset. Per-test cleanup via a `db_cleanup` fixture; payloads are uuid-salted so each run exercises the chunk→embed→persist path rather than short-circuiting through dedupe. The "three tests, not more" framing is in [`DECISIONS.md §13`](./DECISIONS.md#13-tests).
 
 ## Known limitations
 
-- **DB connection held during upstream calls.** `Depends(get_conn)` borrows a pooled connection for the full request lifetime, including upstream LLM/embedding calls (`/chat` makes 3 sequential ones). Pool is 1–10, so this would exhaust under meaningful concurrency. Half-day fix: release-before-upstream + reacquire-after. ([PR #7](https://github.com/nainajnahO/rag-knowledge-base/pull/7))
+- **DB connection held during upstream calls.** `Depends(get_conn)` borrows a pooled connection for the full request lifetime, including upstream LLM/embedding calls (`/chat` now makes up to 4 sequential ones with the graph layer). Pool is 1–10, so this would exhaust under meaningful concurrency. Half-day fix: release-before-upstream + reacquire-after. ([PR #7](https://github.com/nainajnahO/rag-knowledge-base/pull/7))
 - **HNSW is approximate.** Recall typically >95%, not 100%. Mitigation: `SET LOCAL hnsw.ef_search = 100` per query — trades ~1ms latency for higher recall. ([§6](./DECISIONS.md#6-vector-index))
 - **Lexical lane uses `'simple'` config.** Language-neutral — keeps non-English content from being mis-stemmed, but skips per-language morphology lift. ([issue #3](https://github.com/nainajnahO/rag-knowledge-base/issues/3) / [§7.1](./DECISIONS.md#7-hybrid-search-fusion))
 - **Single-turn `/chat`.** Multi-turn requires query rewriting; doing it badly is worse than not doing it. Brief asks for single-turn. ([§10](./DECISIONS.md#10-chat-shape--single-turn))
 - **Dedupe is silent.** `POST /text` / `/document` ignore new metadata when content matches an existing document by SHA-256. ([§12](./DECISIONS.md#12-upload-dedupe))
+- **Sync graph extraction at ingest** adds ~3-5s of latency per `POST /text` / `POST /document`. Acceptable for the demo scale; async + Batch API is the production path. ([§18.4](./DECISIONS.md#184-why-sync-at-ingest-not-asyncbatch-api))
+- **Resolution canonicals capped at 200 per type.** Beyond that, older canonicals can be re-split by the resolver. v2 path: embedding-based shortlisting. ([§18.11](./DECISIONS.md#1811-known-limitations-and-their-mitigations--migration-paths))
 
 ## AI collaboration notes
 
