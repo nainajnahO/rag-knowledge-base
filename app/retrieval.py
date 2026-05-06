@@ -66,6 +66,13 @@ WITH vec AS (
       AND  (%(after)s::date  IS NULL OR d.published_date >= %(after)s::date)
       AND  (%(before)s::date IS NULL OR d.published_date <= %(before)s::date)
       AND  (%(meta)s::jsonb  IS NULL OR d.metadata @> %(meta)s::jsonb)
+      AND  (%(n_entities)s = 0 OR EXISTS (
+              SELECT 1 FROM chunk_entity_mentions cem
+              WHERE cem.chunk_id = c.id
+                AND cem.entity_id = ANY(%(entity_ids)s::uuid[])
+              GROUP BY cem.chunk_id
+              HAVING COUNT(DISTINCT cem.entity_id) = %(n_entities)s
+           ))
     ORDER BY c.embedding <=> %(query_vec)s::vector
     LIMIT {RRF_CANDIDATES_PER_LANE}
 ),
@@ -81,6 +88,13 @@ lex AS (
       AND  (%(after)s::date  IS NULL OR d.published_date >= %(after)s::date)
       AND  (%(before)s::date IS NULL OR d.published_date <= %(before)s::date)
       AND  (%(meta)s::jsonb  IS NULL OR d.metadata @> %(meta)s::jsonb)
+      AND  (%(n_entities)s = 0 OR EXISTS (
+              SELECT 1 FROM chunk_entity_mentions cem
+              WHERE cem.chunk_id = c.id
+                AND cem.entity_id = ANY(%(entity_ids)s::uuid[])
+              GROUP BY cem.chunk_id
+              HAVING COUNT(DISTINCT cem.entity_id) = %(n_entities)s
+           ))
     ORDER BY ts_rank_cd(c.tsv, q) DESC
     LIMIT {RRF_CANDIDATES_PER_LANE}
 ),
@@ -126,6 +140,10 @@ def retrieve(
     query_vec = embed_query_with_error_mapping(query)
     meta_json = json.dumps(filters.metadata) if filters.metadata else None
 
+    # DECISIONS.md §KG: chunk-level AND co-mention. n_entities=0 short-circuits
+    # the EXISTS clause so behaviour with no entity filter is identical to the
+    # pre-graph version. The HAVING COUNT(DISTINCT) gate enforces "every listed
+    # entity appears in this chunk" rather than "any one does".
     params = {
         "query_vec": query_vec,
         "query_text": query,
@@ -133,6 +151,8 @@ def retrieve(
         "after": filters.published_after,
         "before": filters.published_before,
         "meta": meta_json,
+        "entity_ids": filters.entity_ids,
+        "n_entities": len(filters.entity_ids),
         "k": k,
     }
 
