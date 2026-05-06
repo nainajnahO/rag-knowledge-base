@@ -11,6 +11,7 @@ Design rationale, alternatives considered, and migration paths are in [`DECISION
 - [Architecture](#architecture)
 - [Data model](#data-model)
 - [Tests](#tests)
+- [Graph vs baseline](#graph-vs-baseline)
 - [Known limitations](#known-limitations)
 - [AI collaboration notes](#ai-collaboration-notes)
 
@@ -192,6 +193,40 @@ uv run pytest -q   # ~55 seconds with the graph tests; needs both API keys + Pos
 ```
 
 Tests hit the real dev Postgres and the real Voyage / Anthropic upstreams; tests that need an upstream key skip cleanly when the key is unset. Per-test cleanup via a `db_cleanup` fixture; payloads are uuid-salted so each run exercises the chunk→embed→persist path rather than short-circuiting through dedupe. The "three tests, not more" framing is in [`DECISIONS.md §13`](./DECISIONS.md#13-tests).
+
+## Graph vs baseline
+
+The brief asks not just to build the graph but to "show how the graph can improve retrieval." `POST /chat` accepts a `use_graph` boolean that toggles the entity pre-filter, so the same handler runs as the pre-graph baseline or the graph-aware path on a per-request basis. Defaults to `true`.
+
+```bash
+# Graph-aware (default) — entity pre-filter narrows the candidate pool
+curl -X POST http://localhost:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "What did Maria Garcia announce in Berlin?"}'
+
+# Baseline — same hybrid retrieval + rerank, no entity filter
+curl -X POST http://localhost:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "What did Maria Garcia announce in Berlin?", "use_graph": false}'
+```
+
+`evals/run_eval.py` ingests a small handcrafted corpus (5 docs sharing entities) and runs 7 golden questions through both modes. Snapshot from `uv run python -m evals.run_eval` (single-run, LLM-driven extraction is non-deterministic):
+
+| # | Question | Graph on | Graph off |
+|---|---|---|---|
+| 1 | What did Quintara Industries report in Q1 2026? | ✓ (3 src) | ✓ (5 src) |
+| 2 | What did Quintara Industries announce in Berlin? | ✓ (1 src) | ✓ (5 src) |
+| 3 | What did Maria Garcia announce in Berlin? | ✓ (1 src) | ✓ (5 src) |
+| 4 | What did Maria Garcia present at TechSummit 2026? | ✓ (1 src) | ✓ (5 src) |
+| 5 | Where is Tanaka Holdings headquartered? | ✓ (5 src) | ✓ (5 src) |
+| 6 | What is the size of the partnership between Quintara Industries and Tanaka Holdings? | ✓ (5 src) | ✓ (5 src) |
+| 7 | Who founded Tanaka Holdings? | ✓ (5 src) | ✓ (5 src) |
+| **Pass rate** | | **7/7** | **7/7** |
+| **Avg distinct sources** | | **3.0** | **5.0** |
+
+Two distinct signals. **Pass rate** measures whether the pipeline answers correctly (right document in sources, expected substring in the answer). At this corpus scale hybrid retrieval + rerank already lands the right chunks in both modes, so this number is equal. **Avg distinct sources** is the count of distinct documents the answer was grounded on — the graph's actual narrowing effect on the candidate pool, which the pass criterion can't see by construction. Lower is sharper.
+
+The brief's "X together with Y" example (e.g. Q3 — *Maria Garcia* together with *Berlin*) is exactly where the graph earns its keep: the same-chunk co-mention filter narrows from five source documents down to the single document that mentions both entities together. Q5–Q7 show graceful degradation — when entity extraction from the question doesn't surface a name the resolver knows, the filter is silently a no-op and the pipeline runs as plain hybrid retrieval. Reproduce or rerun via [`evals/README.md`](./evals/README.md). ([§18.13](./DECISIONS.md#1813-demonstrating-the-improvement-eval-harness-shape))
 
 ## Known limitations
 

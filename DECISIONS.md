@@ -767,3 +767,19 @@ Filed in §15 at 2-3 days. Shipped in 12 small commits on `knowledge-graph-entit
 - No async / Batch API — see §18.4
 
 Each of those is a clear future PR; the v1 ships the brief's stretch goal cleanly without dragging them in.
+
+### 18.13 Demonstrating the improvement: eval harness shape
+
+The brief's third graph ask is "show how the graph can improve retrieval." The `evals/` harness is the proof artifact: a runtime opt-out flag (`use_graph` on `ChatRequest`) plus a small corpus + 7 golden questions that run through `/chat` in both modes and produce a markdown comparison table.
+
+**Why a runtime flag, not separate endpoints.** `/chat` auto-extracts entities and applies the filter unconditionally per §18.9, so a baseline comparison on the same handler needs an opt-out. `?use_graph=false` keeps the comparison on a single endpoint with one observable contract — no shadow `/chat-baseline` route to drift, no dead code path. `/search` already supports baseline comparison out of the box (omit `?entity=`), so the flag is `/chat`-only.
+
+**Why pass/fail per question, not LLM-as-judge.** At 7 questions the cost-vs-signal of an LLM judge is unfavourable: an extra 7+ Sonnet calls per run for noisier numbers. The pass criterion is two deterministic gates — every expected substring in the answer (case-insensitive) and every expected document title in the response sources — so the same run produces the same table. Strict on retrieval (the chunk must have made it into context), lenient on phrasing (the LLM can paraphrase).
+
+**Why two metrics, not one.** Pass rate measures *correctness* — did the pipeline answer the question. Avg distinct sources measures *precision* — how many distinct documents the answer was grounded on. The graph's effect is on precision (it narrows the candidate pool); at small corpus scales hybrid retrieval + rerank deliver correct answers in both modes, so a correctness-only metric reads 7/7 vs 7/7 and looks like no improvement. The source-count metric exposes what the graph actually does — typical run shows 3.0 avg sources graph-on vs 5.0 graph-off, with co-mention questions hitting 1 vs 5 (a clean 5× narrowing where the graph filter activates).
+
+**Why /chat the surface, not /search.** The brief frames the deliverable as "chat with knowledge base"; `/chat` is the user-visible surface where the graph earns or doesn't earn its keep. Driving the eval through `/chat` exercises the full path — auto-extraction, entity resolution, filter, retrieval, rerank, citation — not just the SQL.
+
+**Why a 5-doc handcrafted corpus, not the work-sample PDF.** The corpus is constructed so co-mention questions have a single correct document (Doc 1: Quintara + Berlin + Garcia; Doc 2: Quintara + Tanaka + Tokyo; etc.) and so sanity questions have a single answer source. This gives deterministic pass/fail criteria. A real-world corpus would require hand-curating expected document IDs per question on content the eval author didn't choose, which doesn't scale at 2-3 day effort.
+
+**Known limits this eval doesn't show.** It doesn't measure rung-2 capability (graph traversal across documents — see [§18.7](#187-chunk-level-and-co-mention-as-the-search-default), explicitly out of scope), doesn't stress-test corpus scale (hybrid retrieval at 5 docs is already correct, so the graph's *correctness* gain emerges at noisier scales not represented here), and doesn't handle non-determinism beyond noting "single-run snapshot" — re-running can shift the table by a row depending on extraction outcomes. These are documented as the trade-offs of a 2-3 day work-sample eval, not a benchmark suite.
