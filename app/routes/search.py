@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from app.db import ConnDep
+from app.graph import resolve_entity_names
 from app.models import SearchResponse
 from app.rerank import rerank
 from app.retrieval import RRF_CANDIDATES_PER_LANE, Filters, retrieve
@@ -45,17 +46,36 @@ def parse_meta_filters(request: Request) -> dict[str, str]:
     return {k[5:]: v for k, v in request.query_params.items() if k.startswith("meta.")}
 
 
+def parse_entity_filter(
+    conn: ConnDep,
+    entity: Annotated[
+        list[str],
+        Query(description="Entity names — repeat for multiple (chunk-level AND)."),
+    ] = [],
+) -> list[str]:
+    """Resolve repeated ?entity=<name> query params to entity UUIDs (str form).
+
+    Case-insensitive alias lookup via app.graph.resolve_entity_names.
+    Names with no matching alias drop silently — under chunk-level AND
+    semantics (DECISIONS.md §KG #10) an unknown name correctly yields
+    no chunks (no chunk can mention an entity that doesn't exist).
+    """
+    return resolve_entity_names(conn, entity) if entity else []
+
+
 @router.get("/search", response_model=SearchResponse)
 def search(
     conn: ConnDep,
     params: Annotated[SearchParams, Query()],
     metadata: Annotated[dict[str, str], Depends(parse_meta_filters)],
+    entity_ids: Annotated[list[str], Depends(parse_entity_filter)],
 ) -> SearchResponse:
     filters = Filters(
         author=params.author,
         published_after=params.published_after,
         published_before=params.published_before,
         metadata=metadata,
+        entity_ids=entity_ids,
     )
     candidates = retrieve(conn, params.q, k=RRF_CANDIDATES_PER_LANE, filters=filters)
     results = rerank(params.q, candidates, top_k=params.k)
