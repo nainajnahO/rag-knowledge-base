@@ -237,6 +237,8 @@ The brief's "X together with Y" example lives in Q2 / Q3 / Q4 / Q6 — questions
 - **Dedupe is silent.** `POST /text` / `/document` ignore new metadata when content matches an existing document by SHA-256. ([§12](./DECISIONS.md#12-upload-dedupe))
 - **Sync graph extraction at ingest** adds ~1-2s of latency per `POST /text` / `POST /document` (per-chunk Haiku calls fan out to a thread pool, then ≤4 Sonnet resolution calls run serially). Acceptable for the demo scale; async + Batch API is the production path. ([§18.4](./DECISIONS.md#184-why-sync-at-ingest-not-asyncbatch-api))
 - **Resolution canonicals capped at 200 per type.** Beyond that, older canonicals can be re-split by the resolver. v2 path: embedding-based shortlisting. ([§18.11](./DECISIONS.md#1811-known-limitations-and-their-mitigations--migration-paths))
+- **Resolution can mis-merge genuinely distinct entities** that share a surface form ("Apollo 11" the spacecraft vs the documentary). The cookbook's description field is a disambiguation signal but isn't perfect. Quality issue, not a DB-integrity issue. ([§18.11](./DECISIONS.md#1811-known-limitations-and-their-mitigations--migration-paths))
+- **Graph filter selectivity scales with co-mention rarity.** The graph narrows hardest when the entity AND filter is selective (the brief's "X together with Y" shape). On common-name single-entity filters at very large corpora, relative narrowing shrinks — characteristic of chunk-level co-mention as a primitive, not a bug. ([§18.13](./DECISIONS.md#1813-demonstrating-the-improvement-eval-harness-shape))
 
 ## AI collaboration notes
 
