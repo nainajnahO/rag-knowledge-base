@@ -48,6 +48,28 @@ EXTRACTION_SYSTEM = (
 
 EXTRACTION_USER_TMPL = "<document>\n{text}\n</document>"
 
+# Distinct prompt for question-time extraction (`/chat` graph pre-filter).
+# The document prompt's "central to what the document is about" filter
+# under-extracts on short queries — Haiku reads "What did Maria Garcia
+# announce in Berlin?" as having no central entity and returns []. This
+# variant inverts the framing: every named entity matters because the
+# question itself is short and the user named them deliberately.
+EXTRACTION_QUESTION_SYSTEM = (
+    "Extract every named entity from the user question below. Treat the "
+    "question as a chat query against a knowledge base — typically a "
+    "single sentence.\n\n"
+    "Guidelines:\n"
+    "- Include every proper noun referring to a person, organization, "
+    "location, or event, even when mentioned only once. Do NOT filter for "
+    "'centrality'; the question is short and the user named these entities "
+    "deliberately.\n"
+    "- A short description is fine (one phrase from the question is "
+    "enough) — descriptions aren't load-bearing for query-time extraction.\n"
+    "- No relations needed.\n"
+    "- Entity types: PERSON, ORGANIZATION, LOCATION, EVENT only."
+)
+EXTRACTION_QUESTION_USER_TMPL = "<question>\n{text}\n</question>"
+
 
 @contextmanager
 def map_graph_extract_errors() -> Iterator[None]:
@@ -112,10 +134,15 @@ def extract_graphs_from_chunks(chunks: list[Chunk]) -> list[ExtractedGraph]:
 def extract_entities_from_question(question: str) -> list[str]:
     """Extract entity names from a chat question for graph pre-filtering.
 
-    Reuses the Haiku extraction shape (same prompt, same parsed output type)
-    and returns just the raw entity name strings — UUIDs come later via
-    `app.graph.resolve_entity_names`. This is best-effort: any failure
-    falls through to an empty list so the caller can degrade to plain
+    Uses the question-tuned prompt (`EXTRACTION_QUESTION_SYSTEM`) rather
+    than the document prompt — short questions don't have a "central"
+    entity in the way the document prompt expects, so the document prompt
+    silently under-extracts. The question prompt asks Haiku to surface
+    every named entity, which is what the graph pre-filter needs.
+
+    Returns just the raw entity name strings — UUIDs come later via
+    `app.graph.resolve_entity_names`. Best-effort: any failure falls
+    through to an empty list so the caller can degrade to plain
     retrieval rather than refuse the request (DECISIONS.md §18.9).
     """
     try:
@@ -126,14 +153,16 @@ def extract_entities_from_question(question: str) -> list[str]:
                 system=[
                     {
                         "type": "text",
-                        "text": EXTRACTION_SYSTEM,
+                        "text": EXTRACTION_QUESTION_SYSTEM,
                         "cache_control": {"type": "ephemeral"},
                     }
                 ],
                 messages=[
                     {
                         "role": "user",
-                        "content": EXTRACTION_USER_TMPL.format(text=question),
+                        "content": EXTRACTION_QUESTION_USER_TMPL.format(
+                            text=question
+                        ),
                     }
                 ],
                 output_format=ExtractedGraph,
