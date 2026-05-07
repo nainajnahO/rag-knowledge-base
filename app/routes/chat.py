@@ -5,6 +5,8 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field, field_validator
 
 from app.db import ConnDep
+from app.graph import resolve_entity_names
+from app.graph_extract import extract_entities_from_question
 from app.llm import REFUSAL_TEXT, generate_answer
 from app.models import (
     AnswerBlock,
@@ -24,6 +26,9 @@ CHAT_TOP_K = 8
 
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4096)
+    # Opt-out for the graph pre-filter so the same /chat call can run as the
+    # pre-graph baseline. Default True preserves existing behavior.
+    use_graph: bool = True
 
     @field_validator("question")
     @classmethod
@@ -36,7 +41,39 @@ class ChatRequest(BaseModel):
 
 @router.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, conn: ConnDep) -> ChatResponse:
-    candidates = retrieve(conn, req.question, k=RRF_CANDIDATES_PER_LANE, filters=Filters())
+    # DECISIONS.md §18.9: auto-extract entities from the question and
+    # resolve to UUID groups for the graph pre-filter. Per-name resolution
+    # so a single canonical name extracted as multiple types (§18.11)
+    # forms one group whose members are OR-matched in retrieval, rather
+    # than collapsing into multiple "AND" requirements. Names that fail
+    # to resolve silently drop — graceful degradation, not sentinel
+    # padding — so /chat keeps whatever signal extraction surfaced rather
+    # than emptying when one name is out-of-corpus.
+    entity_id_groups: list[list[str]] = []
+    if req.use_graph:
+        raw_names = extract_entities_from_question(req.question)
+        for name in raw_names:
+            resolved = resolve_entity_names(conn, [name])
+            if resolved:
+                entity_id_groups.append(resolved)
+
+    candidates = retrieve(
+        conn,
+        req.question,
+        k=RRF_CANDIDATES_PER_LANE,
+        filters=Filters(entity_id_groups=entity_id_groups),
+    )
+
+    # DECISIONS.md §18.9: never let the graph hide otherwise-relevant
+    # content. If the entity filter narrowed candidates to zero (entities
+    # the question named are in the corpus but never co-mentioned in a
+    # single chunk), retry without the filter so the answer pipeline gets
+    # a fair shot.
+    if not candidates and entity_id_groups:
+        candidates = retrieve(
+            conn, req.question, k=RRF_CANDIDATES_PER_LANE, filters=Filters()
+        )
+
     chunks = rerank(req.question, candidates, top_k=CHAT_TOP_K)
 
     # Refusal is owned by the system prompt + Claude's citation behavior

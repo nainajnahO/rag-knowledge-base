@@ -5,6 +5,8 @@ from fastapi import APIRouter, HTTPException
 
 from app.chunking import chunk_text
 from app.db import ConnDep
+from app.graph_extract import extract_graphs_from_chunks
+from app.graph_resolve import resolve_entities
 from app.ingest import (
     embed_with_error_mapping,
     find_existing_by_hash,
@@ -33,6 +35,12 @@ def ingest_text(req: IngestTextRequest, conn: ConnDep) -> IngestResponse:
 
     embeddings = embed_with_error_mapping(chunks)
 
+    # DECISIONS.md §18.4 — extraction + resolution run before the transaction
+    # opens. A failure here bails out before any DB rows are written, so a
+    # retry won't be short-circuited by the content-hash dedupe path.
+    graphs = extract_graphs_from_chunks(chunks)
+    alias_map = resolve_entities(conn, graphs)
+
     return insert_document_with_chunks(
         conn,
         title=req.title,
@@ -43,4 +51,6 @@ def ingest_text(req: IngestTextRequest, conn: ConnDep) -> IngestResponse:
         content_hash=content_hash,
         chunks=chunks,
         embeddings=embeddings,
+        graphs=graphs,
+        alias_map=alias_map,
     )

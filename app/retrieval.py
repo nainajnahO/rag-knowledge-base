@@ -41,6 +41,16 @@ class Filters(BaseModel):
     published_after: date | None = None
     published_before: date | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
+    # DECISIONS.md §18.7 / §18.11 — resolved entity UUIDs grouped by the
+    # user-passed name they came from. Outer list is one group per
+    # user-name; inner list is the entity_ids that name resolved to. The
+    # inner list can be > 1 element when the same canonical name was
+    # extracted as multiple entity types (`Maria Garcia` as PERSON vs
+    # ORGANIZATION vs EVENT — each is a separate `entities` row). The SQL
+    # filter counts distinct *groups* per chunk, so a chunk mentioning any
+    # one member of each group satisfies that group, with AND across groups.
+    # Empty outer list = no entity filter applied.
+    entity_id_groups: list[list[str]] = Field(default_factory=list)
 
 
 # Filters are applied inside both lanes (not just the outer SELECT) so the
@@ -52,6 +62,14 @@ class Filters(BaseModel):
 # walking past the initial batch until enough rows pass the WHERE to fill
 # LIMIT. At small-corpus scale the planner chooses Seq Scan and the GUC is
 # inert — flagged in §6.1 as a deliberate validation gap.
+#
+# Entity filter shape (§18.7 / §18.11): UNNEST builds (entity_id, group_id)
+# rows from two parallel arrays, JOINs to chunk_entity_mentions, and counts
+# distinct groups per chunk. A chunk satisfies the filter when every group
+# is represented by at least one mention — equivalent to "AND across user-
+# passed names, OR within each name's resolved entity_ids" (which is the
+# documented intent for type-split entities like the same canonical name
+# classified as PERSON in one chunk and ORGANIZATION in another).
 _SQL = f"""
 WITH vec AS (
     SELECT
@@ -63,6 +81,16 @@ WITH vec AS (
       AND  (%(after)s::date  IS NULL OR d.published_date >= %(after)s::date)
       AND  (%(before)s::date IS NULL OR d.published_date <= %(before)s::date)
       AND  (%(meta)s::jsonb  IS NULL OR d.metadata @> %(meta)s::jsonb)
+      AND  (%(n_groups)s = 0 OR EXISTS (
+              SELECT 1 FROM chunk_entity_mentions cem
+              JOIN UNNEST(
+                       %(entity_ids)s::uuid[],
+                       %(entity_groups)s::int[]
+                   ) AS x(eid, grp) ON cem.entity_id = x.eid
+              WHERE cem.chunk_id = c.id
+              GROUP BY cem.chunk_id
+              HAVING COUNT(DISTINCT x.grp) = %(n_groups)s
+           ))
     ORDER BY c.embedding <=> %(query_vec)s::vector
     LIMIT {RRF_CANDIDATES_PER_LANE}
 ),
@@ -78,6 +106,16 @@ lex AS (
       AND  (%(after)s::date  IS NULL OR d.published_date >= %(after)s::date)
       AND  (%(before)s::date IS NULL OR d.published_date <= %(before)s::date)
       AND  (%(meta)s::jsonb  IS NULL OR d.metadata @> %(meta)s::jsonb)
+      AND  (%(n_groups)s = 0 OR EXISTS (
+              SELECT 1 FROM chunk_entity_mentions cem
+              JOIN UNNEST(
+                       %(entity_ids)s::uuid[],
+                       %(entity_groups)s::int[]
+                   ) AS x(eid, grp) ON cem.entity_id = x.eid
+              WHERE cem.chunk_id = c.id
+              GROUP BY cem.chunk_id
+              HAVING COUNT(DISTINCT x.grp) = %(n_groups)s
+           ))
     ORDER BY ts_rank_cd(c.tsv, q) DESC
     LIMIT {RRF_CANDIDATES_PER_LANE}
 ),
@@ -123,6 +161,18 @@ def retrieve(
     query_vec = embed_query_with_error_mapping(query)
     meta_json = json.dumps(filters.metadata) if filters.metadata else None
 
+    # DECISIONS.md §18.7 / §18.11: chunk-level AND co-mention with OR-within-group
+    # for type-split canonicals. Flatten the [(group_id, entity_ids), …] shape
+    # into two parallel arrays — UNNEST(arr1, arr2) zips them in SQL.
+    flat_entity_ids: list[str] = []
+    flat_entity_groups: list[int] = []
+    for group_id, group in enumerate(filters.entity_id_groups):
+        for eid in group:
+            flat_entity_ids.append(eid)
+            flat_entity_groups.append(group_id)
+
+    # n_groups=0 short-circuits the EXISTS clause so behaviour with no entity
+    # filter is identical to the pre-graph version.
     params = {
         "query_vec": query_vec,
         "query_text": query,
@@ -130,6 +180,9 @@ def retrieve(
         "after": filters.published_after,
         "before": filters.published_before,
         "meta": meta_json,
+        "entity_ids": flat_entity_ids,
+        "entity_groups": flat_entity_groups,
+        "n_groups": len(filters.entity_id_groups),
         "k": k,
     }
 
