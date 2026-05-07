@@ -6,13 +6,15 @@ Design rationale, alternatives considered, and migration paths are in [`DECISION
 
 ## Contents
 
-- [Quick start](#quick-start)
+- [Quick start](#quick-start) · [Try it end-to-end](#try-it-end-to-end)
 - [API reference](#api-reference)
 - [Architecture](#architecture)
+- [What I shipped vs. what I cut](#what-i-shipped-vs-what-i-cut)
 - [Data model](#data-model)
 - [Tests](#tests)
 - [Graph vs baseline](#graph-vs-baseline)
 - [Known limitations](#known-limitations)
+- [With more time](#with-more-time)
 - [AI collaboration notes](#ai-collaboration-notes)
 
 ## Quick start
@@ -43,6 +45,37 @@ To reset the database during development (drops all data, re-applies the schema)
 ```bash
 docker compose down -v && docker compose up -d
 ```
+
+### Try it end-to-end
+
+A 30-second smoke test that exercises upload → search → chat with verifiable citations.
+
+```bash
+# 1. Upload a memo with metadata
+curl -X POST http://localhost:8000/text \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Q3 Revenue Memo",
+    "text": "Revenue grew 12% in Q3 2025 to $4.2M, driven by enterprise contracts. The Berlin office contributed 30% of new bookings.",
+    "author": "Finance Team",
+    "published_date": "2025-10-15",
+    "metadata": {"type": "memo", "department": "finance"}
+  }'
+# → {"document_id": "...", "n_chunks": 1}
+
+# 2. Retrieve it via hybrid search + rerank, filtered by metadata
+curl 'http://localhost:8000/search?q=revenue%20growth&meta.department=finance'
+# → {"results": [{"chunk_id": "...", "score": 0.87, "text": "Revenue grew 12%..."}]}
+
+# 3. Ask a question — the answer carries a verbatim cited_text quote per claim
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question": "How much did revenue grow in Q3 2025 and what drove it?"}'
+# → answer_blocks[*].citations[*].cited_text contains the exact substring
+#   from the source chunk that backs each claim — verifiable in seconds.
+```
+
+For the multi-document corpus that demonstrates metadata filtering and graph-aware retrieval across related docs, run `uv run python -m evals.run_eval` (see [`evals/README.md`](./evals/README.md)) — it ingests a 15-doc corpus and runs 7 golden questions through both graph-on and graph-off modes.
 
 ## API reference
 
@@ -173,7 +206,27 @@ curl -X POST http://localhost:8000/chat \
 | **Chat LLM** | Claude Sonnet 4.6, single-turn. | Production default for grounded RAG; single-turn matches the brief. Multi-turn opens a query-rewriting subproblem. ([§9](./DECISIONS.md#9-chat-llm) / [§10](./DECISIONS.md#10-chat-shape--single-turn)) |
 | **Knowledge graph** | Per-chunk Haiku extraction (PERSON / ORGANIZATION / LOCATION / EVENT) + per-document-per-type Sonnet resolution. Postgres relations tables; chunk-level AND co-mention on `?entity=`. | Industry-standard per-chunk extraction (GraphRAG / LightRAG / LlamaIndex / Neo4j); native Anthropic Structured Outputs via `messages.parse`; one DB instead of bolting on Neo4j. ([§18](./DECISIONS.md#18-knowledge-graph-closes-30)) |
 
-Deliberate cuts (multi-turn chat, structure-aware PDF chunking, parent-child chunking, contextual embeddings, streaming `/chat`, API key auth) are listed in [`DECISIONS.md §15`](./DECISIONS.md#15-deliberate-cuts-and-why) with effort estimates, each filed as a GitHub Issue ([#3](https://github.com/nainajnahO/rag-knowledge-base/issues/3), [#25](https://github.com/nainajnahO/rag-knowledge-base/issues/25)–[#29](https://github.com/nainajnahO/rag-knowledge-base/issues/29)). The previously-deferred knowledge graph ([#30](https://github.com/nainajnahO/rag-knowledge-base/issues/30)) shipped — see [§18](./DECISIONS.md#18-knowledge-graph-closes-30).
+## What I shipped vs. what I cut
+
+**Must-haves from the brief — all shipped:** `POST /text`, `POST /document` (PDF + server-side extraction), `GET /search`, `POST /chat`, chunking + Voyage embeddings + Postgres persistence, smoke tests across the load-bearing seams.
+
+**Stretch goals — three of five shipped:**
+- ✅ Hybrid search (vector + tsvector via RRF)
+- ✅ Re-ranking (Voyage `rerank-2.5`)
+- ✅ Knowledge graph (entities + chunk-level AND co-mention filter on `/search` and `/chat`, plus an eval harness comparing graph-on vs graph-off)
+- ❌ Streaming `/chat` — complicates citation parsing in a curl-driven demo; few hours to add.
+- ❌ API key auth — threat model is empty for a single-tenant local demo (no network exposure, upstream costs already gated by server-held keys); would clutter every curl example without protecting anything in scope. ([§14](./DECISIONS.md#14-api-key-auth-stretch-goal) sketches the shape if relevance changes.)
+
+**Deliberately cut from the must-have surface area** (each filed as an Issue with effort estimate; full reasoning in [`DECISIONS.md §15`](./DECISIONS.md#15-deliberate-cuts-and-why)):
+
+| Cut | Why deferred | Effort | Issue |
+|---|---|---|---|
+| Multi-turn `/chat` with query rewriting | Real complexity is the rewriter, not the API. Brief asks for single-turn. | ~1 day | [#25](https://github.com/nainajnahO/rag-knowledge-base/issues/25) |
+| Structure-aware PDF chunking (docling) | Plain-text token chunking is the baseline; structure-aware is the next quality lever. | ~½ day | [#26](https://github.com/nainajnahO/rag-knowledge-base/issues/26) |
+| Parent-child / hierarchical chunking | Real retrieval-quality win, but complicates retrieval and chat. Index shape leaves it cheap to add. | ~1 day | [#27](https://github.com/nainajnahO/rag-knowledge-base/issues/27) |
+| `voyage-context-3` contextual embeddings | Same dimension as voyage-4 → cheap migration. Better story to ship the standard model first. | ~½ day | [#28](https://github.com/nainajnahO/rag-knowledge-base/issues/28) |
+| Per-document language tracking for lexical morphology | `'simple'` tsv config covers any language adequately for the demo; per-language stemming needs language detection. | ~½ day | [#3](https://github.com/nainajnahO/rag-knowledge-base/issues/3) |
+| Production logging / metrics / CI | Brief explicitly excludes these. | n/a | — |
 
 ## Data model
 
@@ -239,6 +292,19 @@ The brief's "X together with Y" example lives in Q2 / Q3 / Q4 / Q6 — questions
 - **Resolution canonicals capped at 200 per type.** Beyond that, older canonicals can be re-split by the resolver. v2 path: embedding-based shortlisting. ([§18.11](./DECISIONS.md#1811-known-limitations-and-their-mitigations--migration-paths))
 - **Resolution can mis-merge genuinely distinct entities** that share a surface form ("Apollo 11" the spacecraft vs the documentary). The cookbook's description field is a disambiguation signal but isn't perfect. Quality issue, not a DB-integrity issue. ([§18.11](./DECISIONS.md#1811-known-limitations-and-their-mitigations--migration-paths))
 - **Graph filter selectivity scales with co-mention rarity.** The graph narrows hardest when the entity AND filter is selective (the brief's "X together with Y" shape). On common-name single-entity filters at very large corpora, relative narrowing shrinks — characteristic of chunk-level co-mention as a primitive, not a bug. ([§18.13](./DECISIONS.md#1813-demonstrating-the-improvement-eval-harness-shape))
+
+## With more time
+
+Ranked by what would move the user-visible quality bar fastest, not by what's most fun:
+
+1. **Release the DB connection across upstream calls.** The single biggest reliability gap today — `Depends(get_conn)` holds a pool slot during LLM/embedding calls, so any meaningful concurrency exhausts the pool. Half-day fix: release-before-upstream + reacquire-after. ([PR #7](https://github.com/nainajnahO/rag-knowledge-base/pull/7))
+2. **Structure-aware PDF chunking** ([#26](https://github.com/nainajnahO/rag-knowledge-base/issues/26)). Plain-text extraction can split tables and lists across chunks; docling keeps document structure intact. ½ day, immediate retrieval-quality lift on real PDFs.
+3. **Parent-child chunking** ([#27](https://github.com/nainajnahO/rag-knowledge-base/issues/27)). Retrieve at fine grain, expand to coarse grain at chat time. Cheap to add given the current schema; meaningful answer-quality lift. ~1 day.
+4. **Async + Batch API for graph extraction** ([§18.4](./DECISIONS.md#184-why-sync-at-ingest-not-asyncbatch-api)). Sync per-chunk Haiku extraction adds 1–2s per ingest. Batch cuts cost ~50% and makes ingest non-blocking.
+5. **Embedding-based shortlisting in entity resolution** ([§18.11](./DECISIONS.md#1811-known-limitations-and-their-mitigations--migration-paths)). Today's 200-canonical-per-type cap starts re-splitting older canonicals at very large corpora — fine for the demo, wrong for a real corpus.
+6. **Multi-turn `/chat`** ([#25](https://github.com/nainajnahO/rag-knowledge-base/issues/25)). Needs a real query rewriter; doing it badly is worse than not doing it. ~1 day.
+
+I'd skip streaming `/chat` and API key auth again unless the use case shifts — neither materially helps the verifiable-citations goal the brief is testing for.
 
 ## AI collaboration notes
 
