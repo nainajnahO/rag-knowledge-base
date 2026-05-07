@@ -210,23 +210,23 @@ curl -X POST http://localhost:8000/chat \
   -d '{"question": "What did Maria Garcia announce in Berlin?", "use_graph": false}'
 ```
 
-`evals/run_eval.py` ingests a small handcrafted corpus (5 docs sharing entities) and runs 7 golden questions through both modes. Snapshot from `uv run python -m evals.run_eval` (single-run, LLM-driven extraction is non-deterministic):
+`evals/run_eval.py` ingests a 15-document corpus (5 target docs that carry the answers + 10 distractor docs that share entity surface forms — Quintara, Garcia, Berlin, Tokyo, Tanaka, TechSummit — but on different topics) and runs 7 golden questions through both modes. The corpus is sized deliberately above `CHAT_TOP_K = 8` so baseline retrieval has to choose 8 of 15 rather than dump everything. Snapshot from `uv run python -m evals.run_eval` (single-run, LLM-driven extraction is non-deterministic):
 
 | # | Question | Graph on | Graph off |
 |---|---|---|---|
-| 1 | What did Quintara Industries report in Q1 2026? | ✓ (3 src) | ✓ (5 src) |
-| 2 | What did Quintara Industries announce in Berlin? | ✓ (1 src) | ✓ (5 src) |
-| 3 | What did Maria Garcia announce in Berlin? | ✓ (1 src) | ✓ (5 src) |
-| 4 | What did Maria Garcia present at TechSummit 2026? | ✓ (1 src) | ✓ (5 src) |
-| 5 | Where is Tanaka Holdings headquartered? | ✓ (5 src) | ✓ (5 src) |
-| 6 | What is the size of the partnership between Quintara Industries and Tanaka Holdings? | ✓ (5 src) | ✓ (5 src) |
-| 7 | Who founded Tanaka Holdings? | ✓ (5 src) | ✓ (5 src) |
+| 1 | What did Quintara Industries report in Q1 2026? | ✓ (7 src) | ✓ (8 src) |
+| 2 | What did Quintara Industries announce in Berlin? | ✓ (1 src) | ✓ (8 src) |
+| 3 | What did Maria Garcia announce in Berlin? | ✓ (1 src) | ✓ (8 src) |
+| 4 | What did Maria Garcia present at TechSummit 2026? | ✓ (1 src) | ✓ (8 src) |
+| 5 | Where is Tanaka Holdings headquartered? | ✓ (3 src) | ✓ (8 src) |
+| 6 | What is the size of the partnership between Quintara Industries and Tanaka Holdings? | ✓ (1 src) | ✓ (8 src) |
+| 7 | Who founded Tanaka Holdings? | ✓ (3 src) | ✓ (8 src) |
 | **Pass rate** | | **7/7** | **7/7** |
-| **Avg distinct sources** | | **3.0** | **5.0** |
+| **Avg distinct sources** | | **2.4** | **8.0** |
 
-Two distinct signals. **Pass rate** measures whether the pipeline answers correctly (right document in sources, expected substring in the answer). At this corpus scale hybrid retrieval + rerank already lands the right chunks in both modes, so this number is equal. **Avg distinct sources** is the count of distinct documents the answer was grounded on — the graph's actual narrowing effect on the candidate pool, which the pass criterion can't see by construction. Lower is sharper.
+Two distinct signals. **Pass rate** measures whether the pipeline answers correctly (right document in sources, expected substring in the answer). Both modes pass — Voyage rerank-2.5 over a 15-doc candidate pool reliably surfaces the right chunk for these questions. **Avg distinct sources** is the count of distinct documents the answer was grounded on, capturing the graph's actual narrowing effect on the candidate pool. Lower is sharper.
 
-The brief's "X together with Y" example (e.g. Q3 — *Maria Garcia* together with *Berlin*) is exactly where the graph earns its keep: the same-chunk co-mention filter narrows from five source documents down to the single document that mentions both entities together. Q5–Q7 show graceful degradation — when entity extraction from the question doesn't surface a name the resolver knows, the filter is silently a no-op and the pipeline runs as plain hybrid retrieval. Reproduce or rerun via [`evals/README.md`](./evals/README.md). ([§18.13](./DECISIONS.md#1813-demonstrating-the-improvement-eval-harness-shape))
+The brief's "X together with Y" example lives in Q2 / Q3 / Q4 / Q6 — questions whose answer requires same-chunk co-mention of two entities. Each one narrows from 8 sources (the top-K of the 15-doc corpus) to 1 source (the single document that satisfies the AND filter). Q5 / Q7 narrow within the entity-relevant subset (3 Tanaka docs vs 8 corpus-wide). Q1 narrows partially (7 Quintara docs vs 8) — `Q1 2026` doesn't extract from the question, so only Quintara filters. Reproduce or rerun via [`evals/README.md`](./evals/README.md). ([§18.13](./DECISIONS.md#1813-demonstrating-the-improvement-eval-harness-shape))
 
 ## Known limitations
 

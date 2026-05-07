@@ -1,11 +1,14 @@
 """Hand-crafted corpus + golden questions for the graph-vs-baseline eval.
 
-Five short text documents share a small entity universe (one organization
-expanding into Berlin and Tokyo, one partner organization with its own
-location and founder, and a person who appears in two unrelated contexts).
-The universe is constructed so several questions are answerable correctly
-only when chunk-level co-mention narrows the candidate pool — which is
-the brief's literal "X together with Y" example shape.
+Fifteen short text documents — five "target" docs that carry the answers
+to each golden question, plus ten "distractor" docs that share entity
+surface forms (Quintara, Garcia, Berlin, Tokyo, Tanaka, TechSummit)
+with the targets but on different topics. The corpus is sized
+deliberately above `CHAT_TOP_K = 8` so baseline retrieval is forced to
+choose 8 of 15 (real lexical/semantic competition) rather than dump
+everything wholesale, which is what happens when the corpus fits inside
+top_k. Each co-mention question is constructed so exactly one document
+satisfies the AND filter — the brief's "X together with Y" shape.
 
 All document titles use the EVAL/ prefix so the runner can clean up its
 own data without touching other ingested content. Each question carries
@@ -28,6 +31,7 @@ class Question(TypedDict):
 
 
 CORPUS: list[Document] = [
+    # === Target documents — each carries the answer to one or more questions. ===
     {
         "title": "EVAL/Quintara Berlin office",
         "text": (
@@ -66,6 +70,101 @@ CORPUS: list[Document] = [
             "Tanaka Holdings, founded in 1962 by Hiroshi Tanaka, operates 47 "
             "manufacturing facilities across Japan. The company is headquartered "
             "in Tokyo."
+        ),
+    },
+    # === Distractor documents — share entity surface forms with the targets ===
+    # === but on different topics. None of them satisfy any question's       ===
+    # === AND filter (verified by hand against the question expectations).   ===
+    {
+        # Quintara mentioned, but no Berlin / Tokyo / Garcia / Tanaka / Q1 2026.
+        "title": "EVAL/Quintara CFO appointment",
+        "text": (
+            "Quintara Industries appointed Patricia Yang as Chief Financial Officer "
+            "effective February 2026. Yang previously served as VP of Finance at "
+            "Helix Aerospace and brings fifteen years of capital-markets experience "
+            "to the role."
+        ),
+    },
+    {
+        # Quintara mentioned, but the location is Boston (not Berlin / Tokyo).
+        "title": "EVAL/Quintara Boston research lab",
+        "text": (
+            "Quintara Industries opened a new artificial-intelligence research lab "
+            "in Boston in March 2026. The lab will focus on autonomous logistics "
+            "and employs eighty researchers led by director Wei Chen."
+        ),
+    },
+    {
+        # Quintara mentioned, no locations or people.
+        "title": "EVAL/Quintara stock split",
+        "text": (
+            "Quintara Industries announced a three-for-one stock split in April 2026, "
+            "citing strong investor interest and a goal of broader retail accessibility. "
+            "The split takes effect on May 15."
+        ),
+    },
+    {
+        # Garcia + Quintara, but not Berlin / TechSummit — narrows for Q3 / Q4.
+        "title": "EVAL/Maria Garcia profile",
+        "text": (
+            "Maria Garcia, Quintara Industries CEO since 2023, was profiled in Wired "
+            "magazine's April 2026 leadership issue. The profile traces her career "
+            "from her early days at logistics startup Routelane to her current role."
+        ),
+    },
+    {
+        # Berlin, no Quintara / Garcia.
+        "title": "EVAL/Berlin tech scene",
+        "text": (
+            "Berlin's startup ecosystem grew eighteen percent in 2025, with new "
+            "venture investment topping four billion euros. The Mitte district hosts "
+            "two hundred of the city's tech firms."
+        ),
+    },
+    {
+        # Tokyo, no Quintara / Tanaka.
+        "title": "EVAL/Tokyo real estate",
+        "text": (
+            "Tokyo office rents climbed six percent in early 2026 as tech firms "
+            "expanded their footprints. Premium districts including Marunouchi and "
+            "Roppongi led the increase."
+        ),
+    },
+    {
+        # Tanaka Holdings, but Osaka not Tokyo, no Quintara.
+        "title": "EVAL/Tanaka Osaka expansion",
+        "text": (
+            "Tanaka Holdings opened a fifth manufacturing facility in Osaka in "
+            "February 2026. The plant will produce industrial sensors and employ "
+            "one hundred fifty workers."
+        ),
+    },
+    {
+        # TechSummit + San Francisco, no Garcia.
+        "title": "EVAL/TechSummit sponsors",
+        "text": (
+            "TechSummit 2026 announced its full sponsor list, with NeoChip and "
+            "Atlas Capital headlining as platinum sponsors. The conference runs "
+            "April 7-10 in San Francisco."
+        ),
+    },
+    {
+        # Pure topic doc — competes lexically with Q2/Q6 (logistics, Europe).
+        "title": "EVAL/European logistics market",
+        "text": (
+            "Europe's logistics-technology market is projected to reach two hundred "
+            "eighty billion euros by 2028, driven by automation, last-mile delivery "
+            "innovation, and supply-chain digitization. Industry analysts cite labor "
+            "shortages as a key driver of investment."
+        ),
+    },
+    {
+        # Pure topic doc — competes lexically with Q2/Q6 (Asia-Pacific supply chain).
+        "title": "EVAL/Asia-Pacific supply chain",
+        "text": (
+            "Asia-Pacific supply chains face increasing pressure from currency "
+            "volatility and shifting trade policies. Manufacturers are diversifying "
+            "suppliers across Vietnam, Indonesia, and Thailand to reduce concentration risk."
         ),
     },
 ]
