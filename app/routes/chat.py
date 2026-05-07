@@ -42,26 +42,34 @@ class ChatRequest(BaseModel):
 @router.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, conn: ConnDep) -> ChatResponse:
     # DECISIONS.md §18.9: auto-extract entities from the question and
-    # resolve to UUIDs for the graph pre-filter. Best-effort — extraction
-    # failure or names not in the corpus return an empty list.
+    # resolve to UUID groups for the graph pre-filter. Per-name resolution
+    # so a single canonical name extracted as multiple types (§18.11)
+    # forms one group whose members are OR-matched in retrieval, rather
+    # than collapsing into multiple "AND" requirements. Names that fail
+    # to resolve silently drop — graceful degradation, not sentinel
+    # padding — so /chat keeps whatever signal extraction surfaced rather
+    # than emptying when one name is out-of-corpus.
+    entity_id_groups: list[list[str]] = []
     if req.use_graph:
         raw_names = extract_entities_from_question(req.question)
-        entity_ids = resolve_entity_names(conn, raw_names) if raw_names else []
-    else:
-        entity_ids = []
+        for name in raw_names:
+            resolved = resolve_entity_names(conn, [name])
+            if resolved:
+                entity_id_groups.append(resolved)
 
     candidates = retrieve(
         conn,
         req.question,
         k=RRF_CANDIDATES_PER_LANE,
-        filters=Filters(entity_ids=entity_ids),
+        filters=Filters(entity_id_groups=entity_id_groups),
     )
 
     # DECISIONS.md §18.9: never let the graph hide otherwise-relevant
     # content. If the entity filter narrowed candidates to zero (entities
-    # the question named aren't yet in the corpus, or co-mention is empty),
-    # retry without the filter so the answer pipeline gets a fair shot.
-    if not candidates and entity_ids:
+    # the question named are in the corpus but never co-mentioned in a
+    # single chunk), retry without the filter so the answer pipeline gets
+    # a fair shot.
+    if not candidates and entity_id_groups:
         candidates = retrieve(
             conn, req.question, k=RRF_CANDIDATES_PER_LANE, filters=Filters()
         )

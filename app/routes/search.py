@@ -61,35 +61,36 @@ def parse_entity_filter(
         list[str],
         Query(description="Entity names — repeat for multiple (chunk-level AND)."),
     ] = [],
-) -> list[str]:
-    """Resolve repeated ?entity=<name> query params to entity UUIDs (str form).
+) -> list[list[str]]:
+    """Resolve repeated ?entity=<name> query params into entity_id groups.
 
-    Case-insensitive alias lookup via app.graph.resolve_entity_names. When
-    every passed name resolves, returns the deduped UUID list and retrieval
-    runs the standard chunk-level AND filter. When *any* passed name fails
-    to match an alias, the filter is unsatisfiable (no chunk can mention an
-    entity that doesn't exist) so this function appends an
-    `_UNRESOLVABLE_ENTITY_SENTINEL` UUID — the EXISTS+HAVING gate then
-    yields empty results.
+    Returns one group per user-passed name; each group's inner list holds
+    the entity UUIDs that name resolved to. The list is > 1 when the same
+    canonical name was extracted as multiple types (e.g. `Maria Garcia` as
+    PERSON, ORGANIZATION, and EVENT — DECISIONS.md §18.11). The retrieval
+    SQL counts distinct *groups* per chunk, so a chunk satisfies a group
+    by mentioning any one of its entity_ids; AND across groups gives the
+    user-intended chunk-level co-mention.
+
+    A name with no matching alias makes the AND filter unsatisfiable. The
+    function returns a group containing only `_UNRESOLVABLE_ENTITY_SENTINEL`
+    so the EXISTS+HAVING gate yields empty results — matching the §18.7
+    contract that "an unknown name yields no chunks."
 
     /chat takes a different path (DECISIONS.md §18.9): unresolved names
-    silently drop and the route falls back to plain hybrid retrieval rather
-    than emptying. /chat calls `resolve_entity_names` directly, not this.
+    silently drop (no sentinel) and the route falls back to plain hybrid
+    retrieval rather than emptying. /chat builds its own groups inline.
     """
     if not entity:
         return []
 
-    resolved = resolve_entity_names(conn, entity)
-
-    # Per-name probe to detect any name that failed to resolve. Comparing
-    # len(resolved) to len(entity) isn't reliable: aliases of the same
-    # canonical entity collapse to one UUID, so `[Acme, Acme Corp]` (both
-    # aliases of one entity) returns one UUID even though both names
-    # resolved successfully.
-    if any(not resolve_entity_names(conn, [name]) for name in entity):
-        resolved = [*resolved, _UNRESOLVABLE_ENTITY_SENTINEL]
-
-    return resolved
+    groups: list[list[str]] = []
+    for name in entity:
+        resolved = resolve_entity_names(conn, [name])
+        if not resolved:
+            resolved = [_UNRESOLVABLE_ENTITY_SENTINEL]
+        groups.append(resolved)
+    return groups
 
 
 @router.get("/search", response_model=SearchResponse)
@@ -97,14 +98,14 @@ def search(
     conn: ConnDep,
     params: Annotated[SearchParams, Query()],
     metadata: Annotated[dict[str, str], Depends(parse_meta_filters)],
-    entity_ids: Annotated[list[str], Depends(parse_entity_filter)],
+    entity_id_groups: Annotated[list[list[str]], Depends(parse_entity_filter)],
 ) -> SearchResponse:
     filters = Filters(
         author=params.author,
         published_after=params.published_after,
         published_before=params.published_before,
         metadata=metadata,
-        entity_ids=entity_ids,
+        entity_id_groups=entity_id_groups,
     )
     candidates = retrieve(conn, params.q, k=RRF_CANDIDATES_PER_LANE, filters=filters)
     results = rerank(params.q, candidates, top_k=params.k)
